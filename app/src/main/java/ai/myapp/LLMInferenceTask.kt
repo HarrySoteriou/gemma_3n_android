@@ -23,7 +23,19 @@ class LLMInferenceTask(private val context: Context) {
     
     init {
         Log.d(TAG, "🔄 LLMInferenceTask constructor started")
-        Log.d(TAG, "✅ LLMInferenceTask constructor completed")
+        try {
+            Log.d(TAG, "🔍 Context received: ${context.javaClass.simpleName}")
+            Log.d(TAG, "🔍 Looking for model file: $GEMMA_MODEL")
+            
+            // Check if we can access external storage
+            val externalStorageState = Environment.getExternalStorageState()
+            Log.d(TAG, "🔍 External storage state: $externalStorageState")
+            
+            Log.d(TAG, "✅ LLMInferenceTask constructor completed")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error in LLMInferenceTask constructor", e)
+            throw e
+        }
     }
 
     companion object {
@@ -180,15 +192,28 @@ class LLMInferenceTask(private val context: Context) {
             Log.e(TAG, "❌ LLM initialization failed!", t)
             Log.e(TAG, "❌ Error type: ${t.javaClass.simpleName}")
             Log.e(TAG, "❌ Error details: ${t.message}")
+            Log.e(TAG, "❌ Full stack trace:")
+            t.printStackTrace()
+            
+            // Additional diagnostic info
+            Log.e(TAG, "🔍 Diagnostic information:")
+            Log.e(TAG, "  - Model name: $GEMMA_MODEL")
+            Log.e(TAG, "  - Context: ${context.javaClass.simpleName}")
+            Log.e(TAG, "  - Files dir: ${context.filesDir?.absolutePath}")
+            Log.e(TAG, "  - External files dir: ${context.getExternalFilesDir(null)?.absolutePath}")
             
             // Clean up any partially initialized state
             llmInference?.let { 
-                runCatching { it.close() }
+                runCatching { 
+                    Log.d(TAG, "🧹 Cleaning up partially initialized LLM engine...")
+                    it.close() 
+                }
                 llmInference = null
             }
             isInitialized.set(false)
             
-            throw t // Re-throw to allow caller to handle
+            // Don't re-throw here, let the caller handle the failure gracefully
+            // throw t // Re-throw to allow caller to handle
         }
     }
 

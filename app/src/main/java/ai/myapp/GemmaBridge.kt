@@ -41,21 +41,49 @@ class GemmaBridge(
             try {
                 Log.d(TAG, "🔄 Creating LLMInferenceTask...")
                 llmInferenceTask = LLMInferenceTask(context)
+                Log.d(TAG, "✅ LLMInferenceTask created successfully")
+                
+                // Check if model file is available before attempting to initialize
+                val modelAvailable = llmInferenceTask?.isModelFileAvailable() ?: false
+                Log.d(TAG, "📁 Model file available: $modelAvailable")
+                
+                if (!modelAvailable) {
+                    Log.e(TAG, "❌ Cannot proceed with initialization: Model file not found")
+                    Log.e(TAG, "📋 Please ensure 'gemma-3n-E2B-it-int4.task' is placed in one of the expected locations")
+                    isInitialized = false
+                    return@launch
+                }
                 
                 Log.d(TAG, "🔄 Initializing LLM model...")
                 llmInferenceTask?.initializeModel()
+                Log.d(TAG, "✅ initializeModel() completed without throwing exception")
                 
                 // Double-check that initialization actually succeeded
-                if (llmInferenceTask?.isReady() == true) {
+                val taskReady = llmInferenceTask?.isReady() ?: false
+                Log.d(TAG, "🔍 Task readiness check: $taskReady")
+                
+                if (taskReady) {
                     isInitialized = true
                     Log.d(TAG, "✅ GemmaBridge initialization completed successfully!")
                 } else {
                     isInitialized = false
                     Log.e(TAG, "❌ GemmaBridge initialization failed: LLM not ready after initialization")
+                    
+                    // Additional diagnostics
+                    llmInferenceTask?.let { task ->
+                        Log.e(TAG, "🔍 Diagnostic info:")
+                        Log.e(TAG, "  - Model file available: ${task.isModelFileAvailable()}")
+                        Log.e(TAG, "  - Task ready: ${task.isReady()}")
+                    }
                 }
                 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Initialization failed!", e)
+                Log.e(TAG, "❌ Initialization failed with exception!", e)
+                Log.e(TAG, "❌ Exception type: ${e.javaClass.simpleName}")
+                Log.e(TAG, "❌ Exception message: ${e.message}")
+                Log.e(TAG, "❌ Stack trace:")
+                e.printStackTrace()
+                
                 isInitialized = false
                 llmInferenceTask?.cleanup()
                 llmInferenceTask = null
