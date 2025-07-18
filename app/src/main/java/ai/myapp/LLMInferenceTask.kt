@@ -66,25 +66,32 @@ class LLMInferenceTask(private val context: Context) {
         
         Log.d(TAG, "Model not in internal storage, looking for external copy...")
         
-        // Look for model in external storage locations
-        val externalPaths = getExternalModelPaths()
-        Log.d(TAG, "Generated external paths:")
-        externalPaths.forEach { Log.d(TAG, "  - $it") }
-        
-        val externalLocations = externalPaths.map { File(it) } + listOf(
-            File("/sdcard/Download/", GEMMA_MODEL),
-            File("/sdcard/", GEMMA_MODEL),
-            File("/sdcard/Android/data/${context.packageName}/files/", GEMMA_MODEL),
+        // PRIORITIZE app-specific directories that don't require permissions
+        val priorityLocations = listOf(
             // App-specific external directory (no permissions needed)
             File(context.getExternalFilesDir(null), GEMMA_MODEL),
-            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), GEMMA_MODEL)
+            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), GEMMA_MODEL),
+            // App-specific directory in Android/data (no permissions needed)
+            File("/sdcard/Android/data/${context.packageName}/files/", GEMMA_MODEL)
         )
         
-        Log.d(TAG, "Checking all possible locations:")
+        // Secondary locations that might require permissions
+        val externalPaths = getExternalModelPaths()
+        val secondaryLocations = externalPaths.map { File(it) } + listOf(
+            File("/sdcard/Download/", GEMMA_MODEL),
+            File("/sdcard/", GEMMA_MODEL)
+        )
+        
+        // Combine all locations with priority order
+        val allLocations = priorityLocations + secondaryLocations
+        
+        Log.d(TAG, "Checking all possible locations (priority order):")
         var sourceFile: File? = null
-        for (location in externalLocations) {
-            Log.d(TAG, "  Checking: ${location.absolutePath} - exists: ${location.exists()}")
-            if (location.exists()) {
+        for ((index, location) in allLocations.withIndex()) {
+            val isPriority = index < priorityLocations.size
+            val exists = location.exists() && location.canRead()
+            Log.d(TAG, "  ${if (isPriority) "PRIORITY" else "FALLBACK"}: ${location.absolutePath} - exists: $exists")
+            if (exists) {
                 Log.i(TAG, "✓ FOUND MODEL AT: ${location.absolutePath}")
                 sourceFile = location
                 break
@@ -92,14 +99,28 @@ class LLMInferenceTask(private val context: Context) {
         }
         
         if (sourceFile == null) {
-            Log.e(TAG, "Model not found in any expected location.")
-            Log.e(TAG, "All checked locations:")
-            externalLocations.forEach { Log.e(TAG, "  - ${it.absolutePath} (exists: ${it.exists()})") }
-            Log.e(TAG, "Please ensure the model file '$GEMMA_MODEL' is in one of these locations:")
-            Log.e(TAG, "  RECOMMENDED (no permissions needed):")
-            Log.e(TAG, "    ${context.getExternalFilesDir(null)?.absolutePath}/$GEMMA_MODEL")
-            Log.e(TAG, "  Alternative (needs storage permission):")
-            Log.e(TAG, "    /sdcard/Download/$GEMMA_MODEL")
+            Log.e(TAG, "❌ Model not found in any location!")
+            Log.e(TAG, "📋 SOLUTION: Place your model file in one of these locations:")
+            Log.e(TAG, "")
+            Log.e(TAG, "🎯 RECOMMENDED (no permissions needed):")
+            context.getExternalFilesDir(null)?.let { dir ->
+                Log.e(TAG, "   ${dir.absolutePath}/$GEMMA_MODEL")
+                // Try to create the directory if it doesn't exist
+                if (!dir.exists()) {
+                    Log.d(TAG, "Creating app-specific directory: ${dir.absolutePath}")
+                    dir.mkdirs()
+                }
+            }
+            Log.e(TAG, "   OR: /sdcard/Android/data/${context.packageName}/files/$GEMMA_MODEL")
+            Log.e(TAG, "")
+            Log.e(TAG, "📱 MANUAL STEPS:")
+            Log.e(TAG, "   1. Connect your device via USB")
+            Log.e(TAG, "   2. Enable 'File Transfer' mode on your device")
+            Log.e(TAG, "   3. Copy $GEMMA_MODEL to one of the recommended paths above")
+            Log.e(TAG, "   4. Restart the app")
+            Log.e(TAG, "")
+            Log.e(TAG, "⚠️  Alternative (requires all files access permission):")
+            Log.e(TAG, "   /sdcard/Download/$GEMMA_MODEL")
             return@withContext null
         }
         
@@ -112,7 +133,7 @@ class LLMInferenceTask(private val context: Context) {
             
             sourceFile.inputStream().use { input ->
                 FileOutputStream(internalModelFile).use { output ->
-                    input.copyTo(output)
+                    input.copyTo(output, bufferSize = 8192)
                 }
             }
             
@@ -124,6 +145,9 @@ class LLMInferenceTask(private val context: Context) {
             
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to copy model to internal storage", e)
+            Log.e(TAG, "💡 This might be a permission issue. Try:")
+            Log.e(TAG, "   1. Grant 'All files access' permission in Settings > Apps > YourApp > Permissions")
+            Log.e(TAG, "   2. Or place the model in: ${context.getExternalFilesDir(null)?.absolutePath}/$GEMMA_MODEL")
             return@withContext null
         }
     }
@@ -156,13 +180,20 @@ class LLMInferenceTask(private val context: Context) {
             val modelPath = ensureModelAvailable()
             if (modelPath == null) {
                 Log.e(TAG, "❌ Cannot initialize LLM: Model file not available")
-                Log.e(TAG, "📋 Instructions:")
-                Log.e(TAG, "1. Connect your device via USB")
-                Log.e(TAG, "2. Copy the model file to one of these locations:")
-                Log.e(TAG, "   RECOMMENDED: ${context.getExternalFilesDir(null)?.absolutePath}/$GEMMA_MODEL")
-                Log.e(TAG, "   Alternative: /sdcard/Download/$GEMMA_MODEL")
-                Log.e(TAG, "3. Grant storage permissions if prompted")
-                Log.e(TAG, "4. Restart the app")
+                Log.e(TAG, "")
+                Log.e(TAG, "🎯 QUICK FIX: Place your model file here:")
+                context.getExternalFilesDir(null)?.let { dir ->
+                    if (!dir.exists()) dir.mkdirs() // Ensure directory exists
+                    Log.e(TAG, "   ${dir.absolutePath}/$GEMMA_MODEL")
+                }
+                Log.e(TAG, "")
+                Log.e(TAG, "📱 STEPS:")
+                Log.e(TAG, "   1. Connect device via USB, enable File Transfer")
+                Log.e(TAG, "   2. Navigate to Android/data/ai.myapp/files/ on your device")
+                Log.e(TAG, "   3. Copy $GEMMA_MODEL to that folder")
+                Log.e(TAG, "   4. Restart the app")
+                Log.e(TAG, "")
+                Log.e(TAG, "💡 TIP: The 'Android/data/ai.myapp/files' folder doesn't require special permissions!")
                 isInitialized.set(false)
                 return@withContext
             }
@@ -302,19 +333,33 @@ class LLMInferenceTask(private val context: Context) {
             return true
         }
         
-        // Check external locations
-        val externalPaths = getExternalModelPaths()
-        val externalLocations = externalPaths.map { File(it) } + listOf(
-            File("/sdcard/Download/", GEMMA_MODEL),
-            File("/sdcard/", GEMMA_MODEL),
-            File("/sdcard/Android/data/${context.packageName}/files/", GEMMA_MODEL),
+        // Check with same priority order as ensureModelAvailable
+        val priorityLocations = listOf(
+            // App-specific external directory (no permissions needed)
             File(context.getExternalFilesDir(null), GEMMA_MODEL),
-            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), GEMMA_MODEL)
+            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), GEMMA_MODEL),
+            // App-specific directory in Android/data (no permissions needed)
+            File("/sdcard/Android/data/${context.packageName}/files/", GEMMA_MODEL)
         )
         
-        for (location in externalLocations) {
-            if (location.exists()) {
-                Log.d(TAG, "✅ Model file found at: ${location.absolutePath}")
+        // Check priority locations first
+        for (location in priorityLocations) {
+            if (location.exists() && location.canRead()) {
+                Log.d(TAG, "✅ Model file found at priority location: ${location.absolutePath}")
+                return true
+            }
+        }
+        
+        // Check secondary locations
+        val externalPaths = getExternalModelPaths()
+        val secondaryLocations = externalPaths.map { File(it) } + listOf(
+            File("/sdcard/Download/", GEMMA_MODEL),
+            File("/sdcard/", GEMMA_MODEL)
+        )
+        
+        for (location in secondaryLocations) {
+            if (location.exists() && location.canRead()) {
+                Log.d(TAG, "✅ Model file found at secondary location: ${location.absolutePath}")
                 return true
             }
         }

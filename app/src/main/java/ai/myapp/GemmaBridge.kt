@@ -28,7 +28,10 @@ class GemmaBridge(
     private var isInitialized = false
 
     init {
-        Log.d(TAG, "🚀 GemmaBridge created - initialization will happen asynchronously")
+        // Show loading UI when initialization starts
+        if (context is MainActivity) {
+            context.runOnUiThread { context.showLoading() }
+        }
     }
 
     /**
@@ -51,6 +54,12 @@ class GemmaBridge(
                     Log.e(TAG, "❌ Cannot proceed with initialization: Model file not found")
                     Log.e(TAG, "📋 Please ensure 'gemma-3n-E2B-it-int4.task' is placed in one of the expected locations")
                     isInitialized = false
+                    // Handle missing model file using callback
+                    if (context is MainActivity) {
+                        context.runOnUiThread { 
+                            context.onModelInitializationFailed("Model file not found. Please ensure 'gemma-3n-E2B-it-int4.task' is available in the app's data directory.")
+                        }
+                    }
                     return@launch
                 }
                 
@@ -65,6 +74,10 @@ class GemmaBridge(
                 if (taskReady) {
                     isInitialized = true
                     Log.d(TAG, "✅ GemmaBridge initialization completed successfully!")
+                    // Notify MainActivity that model is ready
+                    if (context is MainActivity) {
+                        context.runOnUiThread { context.onModelInitialized() }
+                    }
                 } else {
                     isInitialized = false
                     Log.e(TAG, "❌ GemmaBridge initialization failed: LLM not ready after initialization")
@@ -74,6 +87,12 @@ class GemmaBridge(
                         Log.e(TAG, "🔍 Diagnostic info:")
                         Log.e(TAG, "  - Model file available: ${task.isModelFileAvailable()}")
                         Log.e(TAG, "  - Task ready: ${task.isReady()}")
+                    }
+                    // Handle failure using callback
+                    if (context is MainActivity) {
+                        context.runOnUiThread { 
+                            context.onModelInitializationFailed("LLM not ready after initialization. Check model file and permissions.")
+                        }
                     }
                 }
                 
@@ -87,6 +106,12 @@ class GemmaBridge(
                 isInitialized = false
                 llmInferenceTask?.cleanup()
                 llmInferenceTask = null
+                // Handle exception failure using callback
+                if (context is MainActivity) {
+                    context.runOnUiThread { 
+                        context.onModelInitializationFailed("Error loading model: ${e.message}\nPlease ensure model file is available and try again.")
+                    }
+                }
             }
         }
     }
