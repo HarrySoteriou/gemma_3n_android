@@ -51,16 +51,24 @@ class LLMInferenceTask(private val context: Context) {
         
         // Look for model in external storage locations
         val externalPaths = getExternalModelPaths()
+        Log.d(TAG, "Generated external paths:")
+        externalPaths.forEach { Log.d(TAG, "  - $it") }
+        
         val externalLocations = externalPaths.map { File(it) } + listOf(
             File("/sdcard/Download/", GEMMA_MODEL),
             File("/sdcard/", GEMMA_MODEL),
-            File("/sdcard/Android/data/${context.packageName}/files/", GEMMA_MODEL)
+            File("/sdcard/Android/data/${context.packageName}/files/", GEMMA_MODEL),
+            // App-specific external directory (no permissions needed)
+            File(context.getExternalFilesDir(null), GEMMA_MODEL),
+            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), GEMMA_MODEL)
         )
         
+        Log.d(TAG, "Checking all possible locations:")
         var sourceFile: File? = null
         for (location in externalLocations) {
+            Log.d(TAG, "  Checking: ${location.absolutePath} - exists: ${location.exists()}")
             if (location.exists()) {
-                Log.d(TAG, "Found model at: ${location.absolutePath}")
+                Log.i(TAG, "✓ FOUND MODEL AT: ${location.absolutePath}")
                 sourceFile = location
                 break
             }
@@ -68,17 +76,22 @@ class LLMInferenceTask(private val context: Context) {
         
         if (sourceFile == null) {
             Log.e(TAG, "Model not found in any expected location.")
-            Log.e(TAG, "Checked locations:")
-            externalLocations.forEach { Log.e(TAG, "  - ${it.absolutePath}") }
-            Log.e(TAG, "Please push the model to device using:")
-            Log.e(TAG, "adb push \"<path-to-your-model>\" /sdcard/Download/$GEMMA_MODEL")
+            Log.e(TAG, "All checked locations:")
+            externalLocations.forEach { Log.e(TAG, "  - ${it.absolutePath} (exists: ${it.exists()})") }
+            Log.e(TAG, "Please ensure the model file '$GEMMA_MODEL' is in one of these locations:")
+            Log.e(TAG, "  RECOMMENDED (no permissions needed):")
+            Log.e(TAG, "    ${context.getExternalFilesDir(null)?.absolutePath}/$GEMMA_MODEL")
+            Log.e(TAG, "  Alternative (needs storage permission):")
+            Log.e(TAG, "    /sdcard/Download/$GEMMA_MODEL")
             return@withContext null
         }
         
         // Copy model from external to internal storage
         try {
-            Log.d(TAG, "Copying model from ${sourceFile.absolutePath} to internal storage...")
-            Log.d(TAG, "This may take a few minutes for a 3GB file...")
+            val sourceSize = sourceFile.length() / 1024 / 1024 // MB
+            Log.i(TAG, "📋 Copying model from ${sourceFile.absolutePath}")
+            Log.i(TAG, "📋 Size: ${sourceSize}MB - This may take a few minutes...")
+            Log.i(TAG, "📋 Destination: ${internalModelFile.absolutePath}")
             
             sourceFile.inputStream().use { input ->
                 FileOutputStream(internalModelFile).use { output ->
@@ -86,11 +99,14 @@ class LLMInferenceTask(private val context: Context) {
                 }
             }
             
-            Log.d(TAG, "Model copied successfully to: ${internalModelFile.absolutePath}")
+            val finalSize = internalModelFile.length() / 1024 / 1024 // MB
+            Log.i(TAG, "✅ MODEL COPIED SUCCESSFULLY!")
+            Log.i(TAG, "✅ Location: ${internalModelFile.absolutePath}")
+            Log.i(TAG, "✅ Size: ${finalSize}MB")
             return@withContext internalModelFile.absolutePath
             
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to copy model to internal storage", e)
+            Log.e(TAG, "❌ Failed to copy model to internal storage", e)
             return@withContext null
         }
     }
@@ -110,21 +126,30 @@ class LLMInferenceTask(private val context: Context) {
 
     /** Call once (e.g. in a ViewModel's init) */
     suspend fun initializeModel() {
-        if (isInitialized.get()) return
+        if (isInitialized.get()) {
+            Log.e(TAG, "✅ Model already initialized, skipping...")
+            return
+        }
+        
+        Log.e(TAG, "🔄 Starting LLM initialization process...")
+        Log.e(TAG, "🔄 Looking for model: $GEMMA_MODEL")
         
         try {
             // Ensure model is available in internal storage
             val modelPath = ensureModelAvailable()
             if (modelPath == null) {
-                Log.e(TAG, "Cannot initialize LLM: Model file not available")
-                Log.e(TAG, "Instructions:")
+                Log.e(TAG, "❌ Cannot initialize LLM: Model file not available")
+                Log.e(TAG, "📋 Instructions:")
                 Log.e(TAG, "1. Connect your device via USB")
-                Log.e(TAG, "2. Run: adb push \"C:\\Users\\mario\\OneDrive\\Desktop\\Machine Learning Skillset\\android-app\\data\\local\\tmp\\llm\\${GEMMA_MODEL}\" /sdcard/Download/")
-                Log.e(TAG, "3. Restart the app")
+                Log.e(TAG, "2. Copy the model file to one of these locations:")
+                Log.e(TAG, "   RECOMMENDED: ${context.getExternalFilesDir(null)?.absolutePath}/$GEMMA_MODEL")
+                Log.e(TAG, "   Alternative: /sdcard/Download/$GEMMA_MODEL")
+                Log.e(TAG, "3. Grant storage permissions if prompted")
+                Log.e(TAG, "4. Restart the app")
                 return
             }
             
-            Log.d(TAG, "Initializing LLM with model: $modelPath")
+            Log.i(TAG, "🔄 Initializing LLM with model: $modelPath")
             
             val options = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(modelPath)
@@ -134,10 +159,14 @@ class LLMInferenceTask(private val context: Context) {
 
             llmInference = LlmInference.createFromOptions(context, options)
             isInitialized.set(true)
-            Log.d(TAG, "LLM initialised")
+            Log.e(TAG, "🚀 LLM SUCCESSFULLY INITIALIZED AND READY FOR INFERENCE!")
+            Log.e(TAG, "🚀 Model path: $modelPath")
+            Log.e(TAG, "🚀 Max tokens: 512")
+            Log.e(TAG, "🚀 Vision support: enabled")
         } catch (t: Throwable) {
-            Log.e(TAG, "LLM initialization failed.", t)
-            Log.e(TAG, "Error details: ${t.message}")
+            Log.e(TAG, "❌ LLM initialization failed!", t)
+            Log.e(TAG, "❌ Error type: ${t.javaClass.simpleName}")
+            Log.e(TAG, "❌ Error details: ${t.message}")
             isInitialized.set(false)
         }
     }
@@ -183,7 +212,13 @@ class LLMInferenceTask(private val context: Context) {
         }
     }
 
-    fun isReady(): Boolean = isInitialized.get() && !isProcessing.get()
+    fun isReady(): Boolean {
+        val initialized = isInitialized.get()
+        val processing = isProcessing.get()
+        val ready = initialized && !processing
+        Log.v(TAG, "🔍 isReady() check: initialized=$initialized, processing=$processing, ready=$ready")
+        return ready
+    }
 
     fun cleanup() {
         runCatching { llmInference?.close() }

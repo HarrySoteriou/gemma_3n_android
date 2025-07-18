@@ -2,6 +2,7 @@ package ai.myapp
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
@@ -25,11 +26,17 @@ class MainActivity : AppCompatActivity() {
         viewBinding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(viewBinding.root)
 
+        Log.e(TAG, "🔄 Creating GemmaBridge...")
         gemmaBridge = GemmaBridge(this)
+        Log.e(TAG, "✅ GemmaBridge created successfully")
 
         if (allPermissionsGranted()) {
+            Log.i(TAG, "✅ All permissions already granted")
             startCamera()
         } else {
+            Log.i(TAG, "🔄 Requesting permissions...")
+            Log.i(TAG, "   - Camera permission (for live camera feed)")
+            Log.i(TAG, "   - Storage permission (to access AI model)")
             ActivityCompat.requestPermissions(
                 this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS)
         }
@@ -45,9 +52,17 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_CODE_PERMISSIONS) {
             if (allPermissionsGranted()) {
+                Log.i(TAG, "✅ All permissions granted!")
                 startCamera()
             } else {
-                Log.e(TAG, "Permissions not granted by the user.")
+                // Log which permissions are missing
+                val deniedPermissions = permissions.filterIndexed { index, permission ->
+                    grantResults[index] != PackageManager.PERMISSION_GRANTED
+                }
+                Log.e(TAG, "❌ Permissions denied: $deniedPermissions")
+                Log.e(TAG, "❌ The app needs these permissions to function properly:")
+                Log.e(TAG, "   - CAMERA: For camera access")
+                Log.e(TAG, "   - READ_EXTERNAL_STORAGE: To access the AI model file")
                 finish()
             }
         }
@@ -70,6 +85,7 @@ class MainActivity : AppCompatActivity() {
                 .build()
                 .also {
                     it.setAnalyzer(cameraExecutor, { image -> 
+                        Log.v(TAG, "📸 Processing camera frame...")
                         gemmaBridge.processFrame(image)
                     })
                 }
@@ -102,6 +118,20 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "Gemma3N"
         private const val REQUEST_CODE_PERMISSIONS = 10
-        private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
+        
+        private val REQUIRED_PERMISSIONS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ (API 33+)
+            arrayOf(
+                Manifest.permission.CAMERA,
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO
+            )
+        } else {
+            // Android 12 and below
+            arrayOf(
+                Manifest.permission.CAMERA,
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            )
+        }
     }
 }

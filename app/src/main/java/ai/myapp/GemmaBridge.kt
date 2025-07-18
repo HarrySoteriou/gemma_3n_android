@@ -11,22 +11,55 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
-class GemmaBridge(private val context: Context) {
 
-    private val llmInferenceTask = LLMInferenceTask(context)
-    private val processingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val lastProcessedTime = AtomicLong(0)
-    private val processingInterval = 2000L // Process every 2 seconds
+class GemmaBridge(private val context: Context) {
 
     companion object {
         private const val TAG = "GemmaBridge"
     }
 
+    private val llmInferenceTask: LLMInferenceTask
+    private val processingScope: CoroutineScope
+    private val lastProcessedTime = AtomicLong(0)
+    private val processingInterval = 2000L // Process every 2 seconds
+
     init {
-        // Initialize the LLM model
-        processingScope.launch {
-            llmInferenceTask.initializeModel()
+        Log.e(TAG, "🚀 GemmaBridge constructor started")
+        
+        Log.e(TAG, "🔄 Creating LLMInferenceTask...")
+        llmInferenceTask = LLMInferenceTask(context)
+        Log.e(TAG, "✅ LLMInferenceTask created")
+        
+        Log.e(TAG, "🔄 Creating CoroutineScope...")
+        Log.e(TAG, "🔄 Creating SupervisorJob...")
+        val supervisorJob = SupervisorJob()
+        Log.e(TAG, "✅ SupervisorJob created")
+        
+        Log.e(TAG, "🔄 Getting Dispatchers.IO...")
+        val ioDispatcher = Dispatchers.IO
+        Log.e(TAG, "✅ Dispatchers.IO obtained")
+        
+        Log.e(TAG, "🔄 Combining job and dispatcher...")
+        val combinedContext = supervisorJob + ioDispatcher
+        Log.e(TAG, "✅ Context combined")
+        
+        Log.e(TAG, "🔄 Creating CoroutineScope with combined context...")
+        processingScope = CoroutineScope(combinedContext)
+        Log.e(TAG, "✅ CoroutineScope created successfully")
+        
+        Log.e(TAG, "🔄 Testing coroutine launch...")
+        // TEMPORARY: Skip LLM initialization to test if coroutines work
+        try {
+            processingScope.launch {
+                Log.e(TAG, "🎯 INSIDE COROUTINE - This proves coroutines work!")
+                // Temporarily skip: llmInferenceTask.initializeModel()
+                Log.e(TAG, "🏁 Test coroutine completed successfully")
+            }
+            Log.e(TAG, "✅ Coroutine launched successfully!")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Coroutine launch failed!", e)
         }
+        Log.e(TAG, "✅ Constructor finishing...")
     }
 
     fun processFrame(image: ImageProxy) {
@@ -34,10 +67,12 @@ class GemmaBridge(private val context: Context) {
         
         // Skip processing if we're too busy or processed recently
         if (!shouldProcessFrame(currentTime)) {
+            Log.v(TAG, "⏭️ Skipping frame processing (too frequent or LLM not ready)")
             image.close()
             return
         }
 
+        Log.d(TAG, "🖼️ Processing new camera frame")
         // Update last processed time
         lastProcessedTime.set(currentTime)
 
@@ -54,13 +89,16 @@ class GemmaBridge(private val context: Context) {
                     
                     // Update UI on main thread
                     (context as? MainActivity)?.runOnUiThread {
-                        (context as? MainActivity)?.findViewById<OverlayView>(R.id.overlay)?.setDetections(detections)
+                        Log.d(TAG, "📱 Updating UI with ${detections.size} detections")
+                        context.findViewById<OverlayView>(ai.myapp.R.id.overlay)?.setDetections(detections)
                     }
                 } else {
                     // Fallback to simulated detections if LLM not ready
+                    Log.d(TAG, "🤖 LLM not ready, using simulated detections")
                     val detections = getSimulatedDetections()
                     (context as? MainActivity)?.runOnUiThread {
-                        (context as? MainActivity)?.findViewById<OverlayView>(R.id.overlay)?.setDetections(detections)
+                        Log.d(TAG, "📱 Updating UI with ${detections.size} simulated detections")
+                        context.findViewById<OverlayView>(ai.myapp.R.id.overlay)?.setDetections(detections)
                     }
                 }
             } catch (e: Exception) {
@@ -72,7 +110,13 @@ class GemmaBridge(private val context: Context) {
     }
 
     private fun shouldProcessFrame(currentTime: Long): Boolean {
-        return (currentTime - lastProcessedTime.get()) >= processingInterval && llmInferenceTask.isReady()
+        val timeSinceLastProcess = currentTime - lastProcessedTime.get()
+        val isTimeOk = timeSinceLastProcess >= processingInterval
+        val isLlmReady = llmInferenceTask.isReady()
+        
+        Log.v(TAG, "⏰ Time check: ${timeSinceLastProcess}ms >= ${processingInterval}ms = $isTimeOk, LLM ready: $isLlmReady")
+        
+        return isTimeOk && isLlmReady
     }
 
     private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
