@@ -6,60 +6,61 @@ import android.graphics.Matrix
 import android.graphics.RectF
 import android.util.Log
 import androidx.camera.core.ImageProxy
-import kotlinx.coroutines.CoroutineScope
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
 
-class GemmaBridge(private val context: Context) {
+class GemmaBridge(
+    private val context: Context,
+    private val lifecycleOwner: LifecycleOwner
+) {
 
     companion object {
         private const val TAG = "GemmaBridge"
     }
 
-    private val llmInferenceTask: LLMInferenceTask
-    private val processingScope: CoroutineScope
+    private var llmInferenceTask: LLMInferenceTask? = null
     private val lastProcessedTime = AtomicLong(0)
     private val processingInterval = 2000L // Process every 2 seconds
+    private var isInitialized = false
 
     init {
-        Log.e(TAG, "🚀 GemmaBridge constructor started")
+        Log.d(TAG, "🚀 GemmaBridge created - initialization will happen asynchronously")
+    }
+
+    /**
+     * Initialize the LLM asynchronously using lifecycle-aware scope
+     */
+    fun initializeAsync() {
+        Log.d(TAG, "🔄 Starting async initialization...")
         
-        Log.e(TAG, "🔄 Creating LLMInferenceTask...")
-        llmInferenceTask = LLMInferenceTask(context)
-        Log.e(TAG, "✅ LLMInferenceTask created")
-        
-        Log.e(TAG, "🔄 Creating CoroutineScope...")
-        Log.e(TAG, "🔄 Creating SupervisorJob...")
-        val supervisorJob = SupervisorJob()
-        Log.e(TAG, "✅ SupervisorJob created")
-        
-        Log.e(TAG, "🔄 Getting Dispatchers.IO...")
-        val ioDispatcher = Dispatchers.IO
-        Log.e(TAG, "✅ Dispatchers.IO obtained")
-        
-        Log.e(TAG, "🔄 Combining job and dispatcher...")
-        val combinedContext = supervisorJob + ioDispatcher
-        Log.e(TAG, "✅ Context combined")
-        
-        Log.e(TAG, "🔄 Creating CoroutineScope with combined context...")
-        processingScope = CoroutineScope(combinedContext)
-        Log.e(TAG, "✅ CoroutineScope created successfully")
-        
-        Log.e(TAG, "🔄 Testing coroutine launch...")
-        // TEMPORARY: Skip LLM initialization to test if coroutines work
-        try {
-            processingScope.launch {
-                Log.e(TAG, "🎯 INSIDE COROUTINE - This proves coroutines work!")
-                // Temporarily skip: llmInferenceTask.initializeModel()
-                Log.e(TAG, "🏁 Test coroutine completed successfully")
+        lifecycleOwner.lifecycleScope.launch {
+            try {
+                Log.d(TAG, "🔄 Creating LLMInferenceTask...")
+                llmInferenceTask = LLMInferenceTask(context)
+                
+                Log.d(TAG, "🔄 Initializing LLM model...")
+                llmInferenceTask?.initializeModel()
+                
+                // Double-check that initialization actually succeeded
+                if (llmInferenceTask?.isReady() == true) {
+                    isInitialized = true
+                    Log.d(TAG, "✅ GemmaBridge initialization completed successfully!")
+                } else {
+                    isInitialized = false
+                    Log.e(TAG, "❌ GemmaBridge initialization failed: LLM not ready after initialization")
+                }
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Initialization failed!", e)
+                isInitialized = false
+                llmInferenceTask?.cleanup()
+                llmInferenceTask = null
             }
-            Log.e(TAG, "✅ Coroutine launched successfully!")
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Coroutine launch failed!", e)
         }
-        Log.e(TAG, "✅ Constructor finishing...")
     }
 
     fun processFrame(image: ImageProxy) {
@@ -76,30 +77,44 @@ class GemmaBridge(private val context: Context) {
         // Update last processed time
         lastProcessedTime.set(currentTime)
 
-        // Process the frame asynchronously
-        processingScope.launch {
+        // Process the frame asynchronously using lifecycle scope
+        lifecycleOwner.lifecycleScope.launch {
             try {
-                val bitmap = imageProxyToBitmap(image)
-                if (bitmap != null && llmInferenceTask.isReady()) {
-                    val response = llmInferenceTask.analyzeScene(bitmap, 
-                        "Analyze this camera feed for people, objects, and safety concerns. Be concise.")
+                val bitmap = withContext(Dispatchers.IO) {
+                    imageProxyToBitmap(image)
+                }
+                
+                if (bitmap != null && isReady()) {
+                    val response = withContext(Dispatchers.IO) {
+                        llmInferenceTask?.analyzeScene(
+                            bitmap, 
+                            "Analyze this camera feed for people, objects, and safety concerns. Be concise."
+                        )
+                    }
                     
                     // Parse the LLM response and create detections
                     val detections = parseResponseToDetections(response)
                     
-                    // Update UI on main thread
-                    (context as? MainActivity)?.runOnUiThread {
-                        Log.d(TAG, "📱 Updating UI with ${detections.size} detections")
-                        context.findViewById<OverlayView>(ai.myapp.R.id.overlay)?.setDetections(detections)
-                    }
+                    // Update UI on main thread (we're already on Main due to lifecycleScope)
+                    Log.d(TAG, "📱 Updating UI with ${detections.size} detections")
+                    (context as? MainActivity)?.findViewById<OverlayView>(ai.myapp.R.id.overlay)
+                        ?.setDetections(detections)
+                        
                 } else {
                     // Fallback to simulated detections if LLM not ready
-                    Log.d(TAG, "🤖 LLM not ready, using simulated detections")
-                    val detections = getSimulatedDetections()
-                    (context as? MainActivity)?.runOnUiThread {
-                        Log.d(TAG, "📱 Updating UI with ${detections.size} simulated detections")
-                        context.findViewById<OverlayView>(ai.myapp.R.id.overlay)?.setDetections(detections)
+                    if (bitmap == null) {
+                        Log.w(TAG, "🤖 Using simulated detections: Failed to convert camera frame to bitmap")
+                    } else if (!isReady()) {
+                        Log.w(TAG, "🤖 Using simulated detections: LLM not ready (initialized=${isInitialized}, task_ready=${llmInferenceTask?.isReady()})")
+                    } else {
+                        Log.w(TAG, "🤖 Using simulated detections: Unknown reason")
                     }
+                    
+                    val detections = getSimulatedDetections()
+                    
+                    Log.d(TAG, "📱 Updating UI with ${detections.size} simulated detections")
+                    (context as? MainActivity)?.findViewById<OverlayView>(ai.myapp.R.id.overlay)
+                        ?.setDetections(detections)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error processing frame", e)
@@ -112,15 +127,15 @@ class GemmaBridge(private val context: Context) {
     private fun shouldProcessFrame(currentTime: Long): Boolean {
         val timeSinceLastProcess = currentTime - lastProcessedTime.get()
         val isTimeOk = timeSinceLastProcess >= processingInterval
-        val isLlmReady = llmInferenceTask.isReady()
+        val isLlmReady = isReady()
         
         Log.v(TAG, "⏰ Time check: ${timeSinceLastProcess}ms >= ${processingInterval}ms = $isTimeOk, LLM ready: $isLlmReady")
         
         return isTimeOk && isLlmReady
     }
 
-    private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
-        return try {
+    private suspend fun imageProxyToBitmap(image: ImageProxy): Bitmap? = withContext(Dispatchers.IO) {
+        try {
             // Get the YUV_420_888 image format
             val yBuffer = image.planes[0].buffer // Y
             val uBuffer = image.planes[1].buffer // U
@@ -252,15 +267,22 @@ class GemmaBridge(private val context: Context) {
         return listOf(
             Detection(
                 boundingBox = RectF(100f, 200f, 500f, 400f),
-                label = "Initializing Analysis...",
+                label = if (isInitialized) "Analysis Ready..." else "Initializing Analysis...",
                 confidence = 0.75f,
                 classification = "medium"
             )
         )
     }
 
+    fun isReady(): Boolean {
+        return isInitialized && llmInferenceTask?.isReady() == true
+    }
+
     fun cleanup() {
-        llmInferenceTask.cleanup()
+        Log.d(TAG, "🧹 Cleaning up GemmaBridge...")
+        llmInferenceTask?.cleanup()
+        llmInferenceTask = null
+        isInitialized = false
     }
 
     data class Detection(

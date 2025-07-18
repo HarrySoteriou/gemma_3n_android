@@ -20,6 +20,11 @@ class LLMInferenceTask(private val context: Context) {
     private var llmInference: LlmInference? = null          // ❶ correct type
     private val isInitialized = AtomicBoolean(false)
     private val isProcessing = AtomicBoolean(false)
+    
+    init {
+        Log.d(TAG, "🔄 LLMInferenceTask constructor started")
+        Log.d(TAG, "✅ LLMInferenceTask constructor completed")
+    }
 
     companion object {
         private const val TAG = "LLMInferenceTask"
@@ -124,15 +129,15 @@ class LLMInferenceTask(private val context: Context) {
         }
     }
 
-    /** Call once (e.g. in a ViewModel's init) */
-    suspend fun initializeModel() {
+    /** Initialize using official MediaPipe pattern */
+    suspend fun initializeModel() = withContext(Dispatchers.IO) {
         if (isInitialized.get()) {
-            Log.e(TAG, "✅ Model already initialized, skipping...")
-            return
+            Log.d(TAG, "✅ Model already initialized, skipping...")
+            return@withContext
         }
         
-        Log.e(TAG, "🔄 Starting LLM initialization process...")
-        Log.e(TAG, "🔄 Looking for model: $GEMMA_MODEL")
+        Log.d(TAG, "🔄 Starting LLM initialization process...")
+        Log.d(TAG, "🔄 Looking for model: $GEMMA_MODEL")
         
         try {
             // Ensure model is available in internal storage
@@ -146,28 +151,44 @@ class LLMInferenceTask(private val context: Context) {
                 Log.e(TAG, "   Alternative: /sdcard/Download/$GEMMA_MODEL")
                 Log.e(TAG, "3. Grant storage permissions if prompted")
                 Log.e(TAG, "4. Restart the app")
-                return
+                isInitialized.set(false)
+                return@withContext
             }
             
             Log.i(TAG, "🔄 Initializing LLM with model: $modelPath")
             
+            // Follow official MediaPipe pattern
             val options = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(modelPath)
                 .setMaxTokens(512)
-                .setMaxNumImages(4)
+                .setMaxNumImages(1) // Set to 1 for vision support
                 .build()
 
-            llmInference = LlmInference.createFromOptions(context, options)
+            // Create the LLM inference engine
+            val newLlmInference = LlmInference.createFromOptions(context, options)
+            
+            // Only set the instance and flag if creation was successful
+            llmInference = newLlmInference
             isInitialized.set(true)
-            Log.e(TAG, "🚀 LLM SUCCESSFULLY INITIALIZED AND READY FOR INFERENCE!")
-            Log.e(TAG, "🚀 Model path: $modelPath")
-            Log.e(TAG, "🚀 Max tokens: 512")
-            Log.e(TAG, "🚀 Vision support: enabled")
+            
+            Log.d(TAG, "🚀 LLM SUCCESSFULLY INITIALIZED AND READY FOR INFERENCE!")
+            Log.d(TAG, "🚀 Model path: $modelPath")
+            Log.d(TAG, "🚀 Max tokens: 512")
+            Log.d(TAG, "🚀 Vision support: enabled")
+            
         } catch (t: Throwable) {
             Log.e(TAG, "❌ LLM initialization failed!", t)
             Log.e(TAG, "❌ Error type: ${t.javaClass.simpleName}")
             Log.e(TAG, "❌ Error details: ${t.message}")
+            
+            // Clean up any partially initialized state
+            llmInference?.let { 
+                runCatching { it.close() }
+                llmInference = null
+            }
             isInitialized.set(false)
+            
+            throw t // Re-throw to allow caller to handle
         }
     }
 
@@ -181,18 +202,32 @@ class LLMInferenceTask(private val context: Context) {
             "Analyze this scene, list visible objects and any safety concerns."
     ): String? = withContext(Dispatchers.IO) {
 
-        initializeModel()
-        val engine = llmInference ?: return@withContext null
+        // ❶ Check if model is properly initialized before proceeding
+        if (!isInitialized.get()) {
+            Log.w(TAG, "⚠️ Cannot analyze scene: Model not initialized yet")
+            return@withContext null
+        }
 
-        // only one request at a time
-        if (!isProcessing.compareAndSet(false, true)) return@withContext null
+        val engine = llmInference ?: run {
+            Log.e(TAG, "❌ Cannot analyze scene: LLM engine is null despite initialization flag")
+            return@withContext null
+        }
+
+        // ❷ only one request at a time
+        if (!isProcessing.compareAndSet(false, true)) {
+            Log.w(TAG, "⚠️ Cannot analyze scene: Already processing another request")
+            return@withContext null
+        }
+        
         try {
-            // --- create a *new* session for each call ---
+            Log.d(TAG, "🔄 Starting scene analysis...")
+            
+            // ❃ create a *new* session for each call
             val sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions
                 .builder()
                 .setTopK(40)
                 .setTemperature(0.7f)
-                .setGraphOptions(                         // ❷ turn on vision
+                .setGraphOptions(                         // ❹ turn on vision
                     GraphOptions.builder()
                         .setEnableVisionModality(true)
                         .build()
@@ -200,13 +235,15 @@ class LLMInferenceTask(private val context: Context) {
                 .build()
 
             LlmInferenceSession.createFromOptions(engine, sessionOptions).use { session ->
-                session.addQueryChunk(prompt)             // ❸ text first
-                session.addImage(BitmapImageBuilder(bitmap).build()) // ❹ image second
-                return@withContext session.generateResponse()        // blocking version
+                session.addQueryChunk(prompt)             // ❺ text first
+                session.addImage(BitmapImageBuilder(bitmap).build()) // ❻ image second
+                val result = session.generateResponse()  // blocking version
+                Log.d(TAG, "✅ Scene analysis completed successfully")
+                return@withContext result
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "Scene analysis failed", t)
-            "DETECTED: error\nRISK: medium\nACTION: check logs\nCONFIDENCE: low"
+            Log.e(TAG, "❌ Scene analysis failed", t)
+            return@withContext "DETECTED: error\nRISK: medium\nACTION: check logs\nCONFIDENCE: low"
         } finally {
             isProcessing.set(false)
         }
@@ -215,9 +252,50 @@ class LLMInferenceTask(private val context: Context) {
     fun isReady(): Boolean {
         val initialized = isInitialized.get()
         val processing = isProcessing.get()
-        val ready = initialized && !processing
-        Log.v(TAG, "🔍 isReady() check: initialized=$initialized, processing=$processing, ready=$ready")
+        val engineAvailable = llmInference != null
+        val ready = initialized && !processing && engineAvailable
+        
+        Log.v(TAG, "🔍 isReady() check: initialized=$initialized, processing=$processing, engineAvailable=$engineAvailable, ready=$ready")
+        
+        // Additional validation - if flags are inconsistent, fix them
+        if (initialized && !engineAvailable) {
+            Log.w(TAG, "⚠️ Inconsistent state detected: initialized=true but engine=null, fixing...")
+            isInitialized.set(false)
+            return false
+        }
+        
         return ready
+    }
+
+    /**
+     * Check if the model file is available without attempting to load it
+     */
+    fun isModelFileAvailable(): Boolean {
+        val internalFile = File(context.filesDir, GEMMA_MODEL)
+        if (internalFile.exists()) {
+            Log.d(TAG, "✅ Model file found in internal storage")
+            return true
+        }
+        
+        // Check external locations
+        val externalPaths = getExternalModelPaths()
+        val externalLocations = externalPaths.map { File(it) } + listOf(
+            File("/sdcard/Download/", GEMMA_MODEL),
+            File("/sdcard/", GEMMA_MODEL),
+            File("/sdcard/Android/data/${context.packageName}/files/", GEMMA_MODEL),
+            File(context.getExternalFilesDir(null), GEMMA_MODEL),
+            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), GEMMA_MODEL)
+        )
+        
+        for (location in externalLocations) {
+            if (location.exists()) {
+                Log.d(TAG, "✅ Model file found at: ${location.absolutePath}")
+                return true
+            }
+        }
+        
+        Log.w(TAG, "❌ Model file not found in any expected location")
+        return false
     }
 
     fun cleanup() {

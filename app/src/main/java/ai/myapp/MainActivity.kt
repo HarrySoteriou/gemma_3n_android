@@ -26,9 +26,12 @@ class MainActivity : AppCompatActivity() {
         viewBinding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(viewBinding.root)
 
-        Log.e(TAG, "🔄 Creating GemmaBridge...")
-        gemmaBridge = GemmaBridge(this)
-        Log.e(TAG, "✅ GemmaBridge created successfully")
+        Log.d(TAG, "🔄 Creating GemmaBridge...")
+        gemmaBridge = GemmaBridge(this, this) // context, lifecycleOwner
+        Log.d(TAG, "✅ GemmaBridge created successfully")
+        
+        Log.d(TAG, "🔄 Starting async initialization...")
+        gemmaBridge.initializeAsync()
 
         if (allPermissionsGranted()) {
             Log.i(TAG, "✅ All permissions already granted")
