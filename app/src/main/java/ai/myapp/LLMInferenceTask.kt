@@ -10,22 +10,26 @@ import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.concurrent.atomic.AtomicBoolean
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 class LLMInferenceTask(private val context: Context) {
 
     private var llmInference: LlmInference? = null          // ❶ correct type
     private val isInitialized = AtomicBoolean(false)
     private val isProcessing = AtomicBoolean(false)
+    private var isUsingGPU = false // Track GPU delegation status
     
     init {
         Log.d(TAG, "🔄 LLMInferenceTask constructor started")
         try {
             Log.d(TAG, "🔍 Context received: ${context.javaClass.simpleName}")
             Log.d(TAG, "🔍 Looking for model file: $GEMMA_MODEL")
+            
+            // Try to load the native library with context-specific paths
+            loadNativeLibraryWithContext(context)
             
             // Check if we can access external storage
             val externalStorageState = Environment.getExternalStorageState()
@@ -38,9 +42,85 @@ class LLMInferenceTask(private val context: Context) {
         }
     }
 
+    /**
+     * Attempts to load the native library using context-specific paths
+     */
+    private fun loadNativeLibraryWithContext(context: Context) {
+        try {
+            val applicationInfo = context.applicationInfo
+            val nativeLibraryDir = applicationInfo.nativeLibraryDir
+            val libraryPath = "$nativeLibraryDir/litert_lm_main.android_arm64"
+            
+            Log.d(TAG, "🔍 Attempting to load library from: $libraryPath")
+            
+            // Check if the file exists
+            val libraryFile = File(libraryPath)
+            if (libraryFile.exists()) {
+                System.load(libraryPath)
+                Log.d(TAG, "✅ Successfully loaded litert_lm_main.android_arm64 from native library directory")
+            } else {
+                Log.w(TAG, "⚠️ Native library file not found at: $libraryPath")
+                Log.w(TAG, "⚠️ This may be normal if the library is loaded automatically by MediaPipe")
+                
+                // List available files in the native library directory for debugging
+                val nativeDir = File(nativeLibraryDir)
+                if (nativeDir.exists() && nativeDir.isDirectory) {
+                    val files = nativeDir.listFiles()
+                    Log.d(TAG, "📁 Available files in native library directory:")
+                    files?.forEach { file ->
+                        Log.d(TAG, "   - ${file.name}")
+                    }
+                }
+            }
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w(TAG, "⚠️ Could not load native library via context path: ${e.message}")
+            Log.w(TAG, "⚠️ The library may be loaded automatically by MediaPipe framework")
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Error attempting to load native library with context", e)
+        }
+    }
+
     companion object {
         private const val TAG = "LLMInferenceTask"
         private const val GEMMA_MODEL = "gemma-3n-E2B-it-int4.task"
+        
+        // Load the native library for LiteRT LM inference
+        init {
+            try {
+                // Try multiple approaches to load the litert_lm_main.android_arm64 library
+                var loaded = false
+                
+                // Approach 1: Try with standard library name (in case file was renamed)
+                try {
+                    System.loadLibrary("litert_lm_main")
+                    Log.d(TAG, "✅ Successfully loaded litert_lm_main via standard loadLibrary")
+                    loaded = true
+                } catch (e: UnsatisfiedLinkError) {
+                    Log.d(TAG, "Standard library name not found, trying alternatives...")
+                }
+                
+                // Approach 2: Try loading by the full filename
+                if (!loaded) {
+                    try {
+                        System.loadLibrary("litert_lm_main.android_arm64")
+                        Log.d(TAG, "✅ Successfully loaded litert_lm_main.android_arm64 via loadLibrary")
+                        loaded = true
+                    } catch (e: UnsatisfiedLinkError) {
+                        Log.d(TAG, "Full filename approach failed, trying absolute path...")
+                    }
+                }
+                
+                // Approach 3: Try absolute path (this will be updated once we have context)
+                if (!loaded) {
+                    Log.w(TAG, "⚠️ Standard library loading failed.")
+                    Log.w(TAG, "⚠️ The litert_lm_main.android_arm64 library will be loaded when context is available.")
+                    Log.w(TAG, "⚠️ If you see 'native library not found' errors, ensure the library is properly packaged.")
+                }
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Unexpected error during library loading", e)
+            }
+        }
         
         // Paths where the model might be located on the device
         private fun getExternalModelPaths(): List<String> {
@@ -200,7 +280,12 @@ class LLMInferenceTask(private val context: Context) {
             
             Log.i(TAG, "🔄 Initializing LLM with model: $modelPath")
             
-            // Follow official MediaPipe pattern
+            // Create LLM inference options with simplified configuration
+            // Note: GPU/CPU delegation will be handled automatically by MediaPipe
+            isUsingGPU = false // Will be auto-determined by MediaPipe
+            Log.d(TAG, "✅ Using default delegation (MediaPipe will auto-select best option)")
+            
+            // Follow official MediaPipe pattern with GPU acceleration
             val options = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(modelPath)
                 .setMaxTokens(512)
@@ -215,6 +300,7 @@ class LLMInferenceTask(private val context: Context) {
             isInitialized.set(true)
             
             Log.d(TAG, "🚀 LLM SUCCESSFULLY INITIALIZED AND READY FOR INFERENCE!")
+            Log.d(TAG, "🚀 Delegate: ${if (isUsingGPU) "GPU" else "CPU"}")
             Log.d(TAG, "🚀 Model path: $modelPath")
             Log.d(TAG, "🚀 Max tokens: 512")
             Log.d(TAG, "🚀 Vision support: enabled")

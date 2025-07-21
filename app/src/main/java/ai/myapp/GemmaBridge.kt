@@ -24,7 +24,7 @@ class GemmaBridge(
 
     private var llmInferenceTask: LLMInferenceTask? = null
     private val lastProcessedTime = AtomicLong(0)
-    private val processingInterval = 2000L // Process every 2 seconds
+    private val processingInterval = 400L // ~2.5 FPS
     private var isInitialized = false
 
     init {
@@ -123,12 +123,16 @@ class GemmaBridge(
         if (!shouldProcessFrame(currentTime)) {
             Log.v(TAG, "⏭️ Skipping frame processing (too frequent or LLM not ready)")
             image.close()
+            Log.v(TAG, "🗑️ Frame discarded (skipped - throttled)")
             return
         }
 
         Log.d(TAG, "🖼️ Processing new camera frame")
         // Update last processed time
         lastProcessedTime.set(currentTime)
+
+        // Capture rotation
+        val rotation = image.imageInfo.rotationDegrees
 
         // Process the frame asynchronously using lifecycle scope
         lifecycleOwner.lifecycleScope.launch {
@@ -141,38 +145,29 @@ class GemmaBridge(
                     val response = withContext(Dispatchers.IO) {
                         llmInferenceTask?.analyzeScene(
                             bitmap, 
-                            "Analyze this camera feed for people, objects, and safety concerns. Be concise."
+                            "Analyze this camera feed for people, objects, and safety concerns. For each detected object, output in this exact format:\nDETECTED: name\nBOX: [left,top,right,bottom] (normalized 0-1 from left-top)\nCONFIDENCE: high/medium/low\nRISK: low/medium/high/critical\nSeparate multiple objects with --- Be concise and only output the formatted text."
                         )
                     }
                     
                     // Parse the LLM response and create detections
-                    val detections = parseResponseToDetections(response)
+                    val detections = parseResponseToDetections(response, bitmap.width.toFloat(), bitmap.height.toFloat())
                     
                     // Update UI on main thread (we're already on Main due to lifecycleScope)
                     Log.d(TAG, "📱 Updating UI with ${detections.size} detections")
                     (context as? MainActivity)?.findViewById<OverlayView>(ai.myapp.R.id.overlay)
-                        ?.setDetections(detections)
-                        
+                        ?.setResults(detections, bitmap.height, bitmap.width, rotation)
                 } else {
-                    // Fallback to simulated detections if LLM not ready
-                    if (bitmap == null) {
-                        Log.w(TAG, "🤖 Using simulated detections: Failed to convert camera frame to bitmap")
-                    } else if (!isReady()) {
-                        Log.w(TAG, "🤖 Using simulated detections: LLM not ready (initialized=${isInitialized}, task_ready=${llmInferenceTask?.isReady()})")
-                    } else {
-                        Log.w(TAG, "🤖 Using simulated detections: Unknown reason")
-                    }
-                    
-                    val detections = getSimulatedDetections()
-                    
-                    Log.d(TAG, "📱 Updating UI with ${detections.size} simulated detections")
+                    Log.w(TAG, "⚠️ Skipping inference: bitmap=${bitmap != null}, ready=${isReady()}")
                     (context as? MainActivity)?.findViewById<OverlayView>(ai.myapp.R.id.overlay)
-                        ?.setDetections(detections)
+                        ?.setResults(emptyList(), bitmap?.height ?: 480, bitmap?.width ?: 640, rotation)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error processing frame", e)
+                (context as? MainActivity)?.findViewById<OverlayView>(ai.myapp.R.id.overlay)
+                    ?.setResults(emptyList(), image.height, image.width, rotation)
             } finally {
                 image.close()
+                Log.v(TAG, "🗑️ Frame discarded after processing")
             }
         }
     }
@@ -244,87 +239,70 @@ class GemmaBridge(
         }
     }
 
-    private fun parseResponseToDetections(response: String?): List<Detection> {
+    private fun parseResponseToDetections(response: String?, imgWidth: Float, imgHeight: Float): List<Detection> {
         if (response.isNullOrEmpty()) {
             Log.w(TAG, "Empty response received")
-            return getSimulatedDetections()
+            return emptyList()
         }
 
         return try {
             val detections = mutableListOf<Detection>()
             
-            // Parse the structured response from LLM
-            val lines = response.split("\n")
-            var detected = ""
-            var risk = "low"
-            var action = ""
-            var confidence = "medium"
+            // Split by separator for multiple objects
+            val objects = response.split("---")
             
-            lines.forEach { line ->
-                when {
-                    line.startsWith("DETECTED:") -> detected = line.substringAfter("DETECTED:").trim()
-                    line.startsWith("RISK:") -> risk = line.substringAfter("RISK:").trim()
-                    line.startsWith("ACTION:") -> action = line.substringAfter("ACTION:").trim()
-                    line.startsWith("CONFIDENCE:") -> confidence = line.substringAfter("CONFIDENCE:").trim()
-                }
-            }
-            
-            Log.d(TAG, "Parsed - Detected: $detected, Risk: $risk, Action: $action, Confidence: $confidence")
-            
-            // Create detection based on LLM analysis
-            if (detected.isNotEmpty()) {
-                val confidenceValue = when (confidence.lowercase()) {
-                    "high" -> 0.9f
-                    "medium" -> 0.7f
-                    "low" -> 0.5f
-                    else -> 0.6f
+            objects.forEach { objText ->
+                val lines = objText.trim().split("\n")
+                var detected = ""
+                var boxStr = ""
+                var confidenceStr = ""
+                var risk = "low"
+                
+                lines.forEach { line ->
+                    when {
+                        line.startsWith("DETECTED:") -> detected = line.substringAfter("DETECTED:").trim()
+                        line.startsWith("BOX:") -> boxStr = line.substringAfter("BOX:").trim()
+                        line.startsWith("CONFIDENCE:") -> confidenceStr = line.substringAfter("CONFIDENCE:").trim()
+                        line.startsWith("RISK:") -> risk = line.substringAfter("RISK:").trim()
+                    }
                 }
                 
-                detections.add(
-                    Detection(
-                        boundingBox = RectF(50f, 100f, 550f, 400f), // Center area of screen
-                        label = detected,
-                        confidence = confidenceValue,
-                        classification = risk.lowercase()
-                    )
-                )
-                
-                // Add action as separate detection if important
-                if (action.isNotEmpty() && action.lowercase() != "none") {
-                    detections.add(
-                        Detection(
-                            boundingBox = RectF(50f, 450f, 550f, 550f), // Bottom area
-                            label = "Action: $action",
-                            confidence = confidenceValue,
-                            classification = when {
-                                action.contains("urgent", ignoreCase = true) -> "critical"
-                                action.contains("caution", ignoreCase = true) -> "high"
-                                else -> "medium"
-                            }
+                if (detected.isNotEmpty() && boxStr.isNotEmpty()) {
+                    // Parse box [left,top,right,bottom]
+                    val coords = boxStr.trim(' ', '[', ']').split(",").mapNotNull { it.trim().toFloatOrNull() }
+                    if (coords.size == 4) {
+                        val left = coords[0] * imgWidth
+                        val top = coords[1] * imgHeight
+                        val right = coords[2] * imgWidth
+                        val bottom = coords[3] * imgHeight
+                        
+                        val confidenceValue = when (confidenceStr.lowercase()) {
+                            "high" -> 0.9f
+                            "medium" -> 0.7f
+                            "low" -> 0.5f
+                            else -> 0.6f
+                        }
+                        
+                        detections.add(
+                            Detection(
+                                boundingBox = RectF(left, top, right, bottom),
+                                label = detected,
+                                confidence = confidenceValue,
+                                classification = risk.lowercase()
+                            )
                         )
-                    )
+                    }
                 }
-            } else {
-                Log.w(TAG, "No objects detected in response")
-                return getSimulatedDetections()
             }
             
+            if (detections.isEmpty()) {
+                Log.w(TAG, "No valid objects parsed from response")
+            }
             detections
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing LLM response: $response", e)
-            getSimulatedDetections()
+            emptyList()
         }
-    }
-
-    private fun getSimulatedDetections(): List<Detection> {
-        return listOf(
-            Detection(
-                boundingBox = RectF(100f, 200f, 500f, 400f),
-                label = if (isInitialized) "Analysis Ready..." else "Initializing Analysis...",
-                confidence = 0.75f,
-                classification = "medium"
-            )
-        )
     }
 
     fun isReady(): Boolean {
