@@ -18,6 +18,7 @@ import com.google.ai.edge.litert.TensorBuffer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.core.graphics.scale
 
 /**
  * A modern inference task handler using the LiteRT Next API.
@@ -153,7 +154,7 @@ class LLMInferenceTask(
     }
 
     private fun preprocessImage(bitmap: Bitmap): FloatArray {
-        val resizedBitmap = Bitmap.createScaledBitmap(bitmap, IMAGE_SIZE, IMAGE_SIZE, true)
+        val resizedBitmap = bitmap.scale(IMAGE_SIZE, IMAGE_SIZE)
         val pixelCount = IMAGE_SIZE * IMAGE_SIZE
         val imageArray = FloatArray(pixelCount * 3)
         val pixels = IntArray(pixelCount)

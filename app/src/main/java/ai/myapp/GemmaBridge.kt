@@ -84,14 +84,6 @@ class GemmaBridge(
 
                             // Verify buffer dimensions
                             Log.d(TAG, "📊 Model has ${inputs.size} inputs and ${outputs.size} outputs")
-                            inputs.forEachIndexed { i, buffer ->
-                                val shape = buffer.shape()
-                                Log.d(TAG, "📊 Input $i shape: [${shape.joinToString(", ")}]")
-                            }
-                            outputs.forEachIndexed { i, buffer ->
-                                val shape = buffer.shape()
-                                Log.d(TAG, "📊 Output $i shape: [${shape.joinToString(", ")}]")
-                            }
 
                             // If we get here, initialization succeeded
                             compiledModel = compiledModelInstance
