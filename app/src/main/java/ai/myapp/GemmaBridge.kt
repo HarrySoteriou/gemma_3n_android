@@ -9,10 +9,12 @@ import androidx.camera.core.ImageProxy
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 
-import com.google.ai.edge.litert.LlmInference
-import com.google.ai.edge.litert.LlmInferenceOptions
-import com.google.ai.edge.litert.TextGenerationResult
-import com.google.ai.edge.next.NpuDelegatePlugin
+// Updated imports for LiteRT Next
+import com.google.ai.edge.litert.Accelerator
+import com.google.ai.edge.litert.BuiltinNpuAcceleratorProvider
+import com.google.ai.edge.litert.CompiledModel
+import com.google.ai.edge.litert.Environment
+import com.google.ai.edge.litert.ModelProvider
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -30,11 +32,16 @@ class GemmaBridge(
         private const val MODEL_PATH = "gemma-3n-E2B-it-int4.task" // Define model path here
     }
 
-    // This will hold our inference engine instance
-    private var llmInference: LlmInference? = null
+    // Updated for LiteRT Next
+    private var compiledModel: CompiledModel? = null
+    private var inputBuffers: List<com.google.ai.edge.litert.TensorBuffer>? = null
+    private var outputBuffers: List<com.google.ai.edge.litert.TensorBuffer>? = null
     private val lastProcessedTime = AtomicLong(0)
     private val processingInterval = 400L // ~2.5 FPS
     private var isInitialized = false
+    private var currentAccelerator: Accelerator? = null
+    private val singleThreadDispatcher = Dispatchers.IO.limitedParallelism(1, "ModelDispatcher")
+
 
     init {
         // Show loading UI when initialization starts
@@ -47,78 +54,71 @@ class GemmaBridge(
      * Initialize the LLM asynchronously, trying NPU -> GPU -> CPU.
      */
     fun initializeAsync() {
-        Log.d(TAG, "🔄 Starting async initialization...")
+        Log.d(TAG, "🔄 Starting LiteRT Next initialization...")
 
         lifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
             try {
-                // Attempt to initialize with NPU delegate
-                var delegate = LlmInference.Delegate.NPU
-                Log.d(TAG, "🚀 Attempting to initialize with NPU delegate...")
-                llmInference = createLlmInference(delegate)
+                // Create environment with NPU support
+                val env = Environment.create(BuiltinNpuAcceleratorProvider(context))
 
-                // If NPU fails, fall back to GPU
-                if (llmInference == null) {
-                    Log.w(TAG, "⚠️ NPU initialization failed. Falling back to GPU.")
-                    delegate = LlmInference.Delegate.GPU
-                    Log.d(TAG, "🚀 Attempting to initialize with GPU delegate...")
-                    llmInference = createLlmInference(delegate)
-                }
-
-                // If GPU also fails, fall back to CPU
-                if (llmInference == null) {
-                    Log.w(TAG, "⚠️ GPU initialization failed. Falling back to CPU.")
-                    delegate = LlmInference.Delegate.CPU
-                    Log.d(TAG, "🔧 Attempting to initialize with CPU delegate...")
-                    llmInference = createLlmInference(delegate)
-                }
-
-                // Final check
-                if (llmInference != null) {
-                    isInitialized = true
-                    Log.d(TAG, "✅ GemmaBridge initialization successful with [${delegate.name}] delegate!")
-                    withContext(Dispatchers.Main) {
-                        (context as? MainActivity)?.onModelInitialized()
+                // Try accelerators in order: GPU -> NPU -> CPU
+                val accelerators = listOf(Accelerator.GPU, Accelerator.NPU, Accelerator.CPU)
+                
+                for (accelerator in accelerators) {
+                    try {
+                        Log.d(TAG, "🚀 Attempting initialization with ${accelerator.name} accelerator...")
+                        
+                        withContext(singleThreadDispatcher) {
+                            // Create model with specific accelerator
+                            val model = CompiledModel.create(
+                                context.assets,
+                                MODEL_PATH,
+                                CompiledModel.Options(accelerator),
+                                env
+                            )
+                            
+                            // Create input/output buffers
+                            val inputs = model.createInputBuffers()
+                            val outputs = model.createOutputBuffers()
+                            
+                            // If we get here, initialization succeeded
+                            compiledModel = model
+                            inputBuffers = inputs
+                            outputBuffers = outputs
+                            currentAccelerator = accelerator
+                            isInitialized = true
+                            
+                            Log.d(TAG, "✅ LiteRT Next initialization successful with ${accelerator.name}!")
+                        }
+                        
+                        // Success - notify UI and break the loop
+                        withContext(Dispatchers.Main) {
+                            (context as? MainActivity)?.onModelInitialized()
+                        }
+                        return@launch
+                        
+                    } catch (e: Exception) {
+                        Log.w(TAG, "⚠️ ${accelerator.name} initialization failed: ${e.message}")
+                        // Continue to next accelerator
                     }
-                } else {
-                    isInitialized = false
-                    Log.e(TAG, "❌ GemmaBridge initialization failed on all delegates.")
-                    withContext(Dispatchers.Main) {
-                        (context as? MainActivity)?.onModelInitializationFailed("Failed to load model on NPU, GPU, or CPU.")
-                    }
                 }
+                
+                // If we get here, all accelerators failed
+                isInitialized = false
+                Log.e(TAG, "❌ All accelerators failed")
+                withContext(Dispatchers.Main) {
+                    (context as? MainActivity)?.onModelInitializationFailed("Failed to initialize with any accelerator")
+                }
+                
             } catch (e: Exception) {
                 isInitialized = false
                 Log.e(TAG, "❌ Initialization failed with exception!", e)
                 withContext(Dispatchers.Main) {
-                    (context as? MainActivity)?.onModelInitializationFailed("Error during model initialization: ${e.message}")
+                    (context as? MainActivity)?.onModelInitializationFailed("Error: ${e.message}")
                 }
             }
         }
     }
-
-    /**
-     * Helper function to create an LlmInference instance with specific options.
-     */
-    private suspend fun createLlmInference(delegate: LlmInference.Delegate): LlmInference? {
-        return try {
-            val optionsBuilder = LlmInferenceOptions.builder()
-                .setModelPath(MODEL_PATH)
-                .setDelegate(delegate)
-
-            // VERY IMPORTANT: For the NPU delegate, you must register the plugin.
-            if (delegate == LlmInference.Delegate.NPU) {
-                optionsBuilder.addPlugin(NpuDelegatePlugin())
-            }
-
-            withContext(Dispatchers.IO) {
-                LlmInference.create(context, optionsBuilder.build())
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to create LlmInference with ${delegate.name} delegate", e)
-            null
-        }
-    }
-
 
     suspend fun analyzeScene(bitmap: Bitmap, prompt: String): String? {
         if (!isReady()) {
@@ -126,11 +126,36 @@ class GemmaBridge(
             return null
         }
         return try {
-            // The new API takes a list of Bitmaps
-            val result: TextGenerationResult = llmInference!!.generateResponse(listOf(bitmap), prompt)
-            result.text()
+            withContext(singleThreadDispatcher) {
+                Log.d(TAG, "🔄 Analyzing scene with ${currentAccelerator?.name ?: "unknown"} accelerator...")
+                
+                val model = compiledModel!!
+                val inputs = inputBuffers!!
+                val outputs = outputBuffers!!
+                
+                // For multimodal LLM, you'll need to write both text and image data
+                // This depends on your specific model's input format
+                // You may need to adapt this based on your model's expected input format
+                
+                // Example - adapt based on your model:
+                // inputs[0].writeString(prompt)  // Text input
+                // inputs[1].writeBitmap(bitmap)  // Image input
+                
+                // For now, let's assume a single input that combines text and image
+                // You'll need to adapt this to your specific model format
+                inputs[0].writeString(prompt) // This may need modification
+                
+                // Run inference
+                model.run(inputs, outputs)
+                
+                // Read output
+                val result = outputs[0].readString() // This may need modification
+                
+                Log.d(TAG, "✅ Scene analysis completed with ${currentAccelerator?.name}")
+                result
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error during inference", e)
+            Log.e(TAG, "❌ Error during inference with ${currentAccelerator?.name}", e)
             null
         }
     }
@@ -148,38 +173,33 @@ class GemmaBridge(
 
         lifecycleOwner.lifecycleScope.launch {
             try {
-                // The image conversion remains a potential bottleneck, but let's focus on the model first.
+                Log.v(TAG, "🖼️ Processing frame with ${currentAccelerator?.name ?: "unknown"}")
+                
                 val bitmap = imageProxyToBitmap(image)
-
                 if (bitmap != null) {
                     val prompt = "Analyze this camera feed for people, objects, and safety concerns. For each detected object, output in this exact format:\nDETECTED: name\nBOX: [left,top,right,bottom] (normalized 0-1 from left-top)\nCONFIDENCE: high/medium/low\nRISK: low/medium/high/critical\nSeparate multiple objects with --- Be concise and only output the formatted text."
 
-                    // Call our new analyzeScene method
                     val response = analyzeScene(bitmap, prompt)
-
                     val detections = parseResponseToDetections(response, bitmap.width.toFloat(), bitmap.height.toFloat())
 
-                    // Update UI on main thread
+                    Log.v(TAG, "🎯 Found ${detections.size} detections using ${currentAccelerator?.name}")
+
                     withContext(Dispatchers.Main) {
                         (context as? MainActivity)?.findViewById<OverlayView>(R.id.overlay)
                             ?.setResults(detections, bitmap.height, bitmap.width, rotation)
                     }
-                    // It's good practice to recycle the bitmap if you created a scaled copy
+                    
                     if (!bitmap.isRecycled) {
                         bitmap.recycle()
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error processing frame", e)
+                Log.e(TAG, "❌ Error processing frame", e)
             } finally {
                 image.close()
             }
         }
     }
-
-    // *** Your other methods (imageProxyToBitmap, parseResponseToDetections, etc.) can remain mostly the same ***
-    // They are well-written for their purpose.
-    // I've included them here for completeness.
 
     private suspend fun imageProxyToBitmap(image: ImageProxy): Bitmap? = withContext(Dispatchers.IO) {
         try {
@@ -215,7 +235,6 @@ class GemmaBridge(
     }
 
     private fun parseResponseToDetections(response: String?, imgWidth: Float, imgHeight: Float): List<Detection> {
-        // This function is fine as-is
         if (response.isNullOrEmpty()) {
             return emptyList()
         }
@@ -268,14 +287,26 @@ class GemmaBridge(
     }
 
     fun isReady(): Boolean {
-        return isInitialized && llmInference != null
+        val ready = isInitialized && compiledModel != null && inputBuffers != null && outputBuffers != null
+        if (!ready) {
+            Log.v(TAG, "🔍 Model not ready - initialized: $isInitialized, accelerator: ${currentAccelerator?.name ?: "none"}")
+        }
+        return ready
     }
 
-    fun cleanup() {
-        Log.d(TAG, "🧹 Cleaning up GemmaBridge...")
-        llmInference?.close()
-        llmInference = null
-        isInitialized = false
+    suspend fun cleanup() {
+        withContext(singleThreadDispatcher) {
+            Log.d(TAG, "🧹 Cleaning up GemmaBridge...")
+            inputBuffers?.forEach { it.close() }
+            outputBuffers?.forEach { it.close() }
+            compiledModel?.close()
+            
+            inputBuffers = null
+            outputBuffers = null
+            compiledModel = null
+            isInitialized = false
+            currentAccelerator = null
+        }
     }
 
     data class Detection(
