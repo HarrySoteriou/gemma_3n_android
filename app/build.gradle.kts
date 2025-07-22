@@ -78,9 +78,16 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:${cameraxVersion}")
     implementation("androidx.camera:camera-view:${cameraxVersion}")
 
-    // Add the MediaPipe dependencies with fixed versions
-    implementation("com.google.mediapipe:tasks-genai:0.10.25")
-    implementation("com.google.mediapipe:tasks-vision:latest.release")
-    implementation("com.google.mediapipe:tasks-text:latest.release")
-    implementation("com.google.mediapipe:tasks-audio:latest.release")
+    // LiteRT for running LLMs like Gemma
+    //implementation("com.google.ai.edge:litert-llm:1.4.0")
+    implementation("com.google.ai.edge.litert:litert:2.0.0-alpha")
+
+    // LiteRT NExt for NPU acceleration on Pixel devices
+    //implementation("com.google.ai.edge:litert-next-npu-delegate:1.4.0")
+
+//    // Add the MediaPipe dependencies with fixed versions
+//    implementation("com.google.mediapipe:tasks-genai:0.10.25")
+//    implementation("com.google.mediapipe:tasks-vision:latest.release")
+//    implementation("com.google.mediapipe:tasks-text:latest.release")
+//    implementation("com.google.mediapipe:tasks-audio:latest.release")
 }

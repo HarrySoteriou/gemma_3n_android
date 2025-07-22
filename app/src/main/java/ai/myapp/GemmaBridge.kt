@@ -8,21 +8,30 @@ import android.util.Log
 import androidx.camera.core.ImageProxy
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
+
+import com.google.ai.edge.litert.LlmInference
+import com.google.ai.edge.litert.LlmInferenceOptions
+import com.google.ai.edge.litert.TextGenerationResult
+import com.google.ai.edge.next.NpuDelegatePlugin
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
 
+// Let's use the core LiteRT class directly instead of a custom wrapper
+// to make the delegate logic clearer.
 class GemmaBridge(
     private val context: Context,
     private val lifecycleOwner: LifecycleOwner
 ) {
-
     companion object {
         private const val TAG = "GemmaBridge"
+        private const val MODEL_PATH = "gemma-3n-E2B-it-int4.task" // Define model path here
     }
 
-    private var llmInferenceTask: LLMInferenceTask? = null
+    // This will hold our inference engine instance
+    private var llmInference: LlmInference? = null
     private val lastProcessedTime = AtomicLong(0)
     private val processingInterval = 400L // ~2.5 FPS
     private var isInitialized = false
@@ -35,204 +44,170 @@ class GemmaBridge(
     }
 
     /**
-     * Initialize the LLM asynchronously using lifecycle-aware scope
+     * Initialize the LLM asynchronously, trying NPU -> GPU -> CPU.
      */
     fun initializeAsync() {
         Log.d(TAG, "🔄 Starting async initialization...")
-        
-        lifecycleOwner.lifecycleScope.launch {
+
+        lifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
             try {
-                Log.d(TAG, "🔄 Creating LLMInferenceTask...")
-                llmInferenceTask = LLMInferenceTask(context)
-                Log.d(TAG, "✅ LLMInferenceTask created successfully")
-                
-                // Check if model file is available before attempting to initialize
-                val modelAvailable = llmInferenceTask?.isModelFileAvailable() ?: false
-                Log.d(TAG, "📁 Model file available: $modelAvailable")
-                
-                if (!modelAvailable) {
-                    Log.e(TAG, "❌ Cannot proceed with initialization: Model file not found")
-                    Log.e(TAG, "📋 Please ensure 'gemma-3n-E2B-it-int4.task' is placed in one of the expected locations")
-                    isInitialized = false
-                    // Handle missing model file using callback
-                    if (context is MainActivity) {
-                        context.runOnUiThread { 
-                            context.onModelInitializationFailed("Model file not found. Please ensure 'gemma-3n-E2B-it-int4.task' is available in the app's data directory.")
-                        }
-                    }
-                    return@launch
+                // Attempt to initialize with NPU delegate
+                var delegate = LlmInference.Delegate.NPU
+                Log.d(TAG, "🚀 Attempting to initialize with NPU delegate...")
+                llmInference = createLlmInference(delegate)
+
+                // If NPU fails, fall back to GPU
+                if (llmInference == null) {
+                    Log.w(TAG, "⚠️ NPU initialization failed. Falling back to GPU.")
+                    delegate = LlmInference.Delegate.GPU
+                    Log.d(TAG, "🚀 Attempting to initialize with GPU delegate...")
+                    llmInference = createLlmInference(delegate)
                 }
-                
-                Log.d(TAG, "🔄 Initializing LLM model...")
-                llmInferenceTask?.initializeModel()
-                Log.d(TAG, "✅ initializeModel() completed without throwing exception")
-                
-                // Double-check that initialization actually succeeded
-                val taskReady = llmInferenceTask?.isReady() ?: false
-                Log.d(TAG, "🔍 Task readiness check: $taskReady")
-                
-                if (taskReady) {
+
+                // If GPU also fails, fall back to CPU
+                if (llmInference == null) {
+                    Log.w(TAG, "⚠️ GPU initialization failed. Falling back to CPU.")
+                    delegate = LlmInference.Delegate.CPU
+                    Log.d(TAG, "🔧 Attempting to initialize with CPU delegate...")
+                    llmInference = createLlmInference(delegate)
+                }
+
+                // Final check
+                if (llmInference != null) {
                     isInitialized = true
-                    Log.d(TAG, "✅ GemmaBridge initialization completed successfully!")
-                    // Notify MainActivity that model is ready
-                    if (context is MainActivity) {
-                        context.runOnUiThread { context.onModelInitialized() }
+                    Log.d(TAG, "✅ GemmaBridge initialization successful with [${delegate.name}] delegate!")
+                    withContext(Dispatchers.Main) {
+                        (context as? MainActivity)?.onModelInitialized()
                     }
                 } else {
                     isInitialized = false
-                    Log.e(TAG, "❌ GemmaBridge initialization failed: LLM not ready after initialization")
-                    
-                    // Additional diagnostics
-                    llmInferenceTask?.let { task ->
-                        Log.e(TAG, "🔍 Diagnostic info:")
-                        Log.e(TAG, "  - Model file available: ${task.isModelFileAvailable()}")
-                        Log.e(TAG, "  - Task ready: ${task.isReady()}")
-                    }
-                    // Handle failure using callback
-                    if (context is MainActivity) {
-                        context.runOnUiThread { 
-                            context.onModelInitializationFailed("LLM not ready after initialization. Check model file and permissions.")
-                        }
+                    Log.e(TAG, "❌ GemmaBridge initialization failed on all delegates.")
+                    withContext(Dispatchers.Main) {
+                        (context as? MainActivity)?.onModelInitializationFailed("Failed to load model on NPU, GPU, or CPU.")
                     }
                 }
-                
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Initialization failed with exception!", e)
-                Log.e(TAG, "❌ Exception type: ${e.javaClass.simpleName}")
-                Log.e(TAG, "❌ Exception message: ${e.message}")
-                Log.e(TAG, "❌ Stack trace:")
-                e.printStackTrace()
-                
                 isInitialized = false
-                llmInferenceTask?.cleanup()
-                llmInferenceTask = null
-                // Handle exception failure using callback
-                if (context is MainActivity) {
-                    context.runOnUiThread { 
-                        context.onModelInitializationFailed("Error loading model: ${e.message}\nPlease ensure model file is available and try again.")
-                    }
+                Log.e(TAG, "❌ Initialization failed with exception!", e)
+                withContext(Dispatchers.Main) {
+                    (context as? MainActivity)?.onModelInitializationFailed("Error during model initialization: ${e.message}")
                 }
             }
+        }
+    }
+
+    /**
+     * Helper function to create an LlmInference instance with specific options.
+     */
+    private suspend fun createLlmInference(delegate: LlmInference.Delegate): LlmInference? {
+        return try {
+            val optionsBuilder = LlmInferenceOptions.builder()
+                .setModelPath(MODEL_PATH)
+                .setDelegate(delegate)
+
+            // VERY IMPORTANT: For the NPU delegate, you must register the plugin.
+            if (delegate == LlmInference.Delegate.NPU) {
+                optionsBuilder.addPlugin(NpuDelegatePlugin())
+            }
+
+            withContext(Dispatchers.IO) {
+                LlmInference.create(context, optionsBuilder.build())
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to create LlmInference with ${delegate.name} delegate", e)
+            null
+        }
+    }
+
+
+    suspend fun analyzeScene(bitmap: Bitmap, prompt: String): String? {
+        if (!isReady()) {
+            Log.w(TAG, "LLM not ready, cannot analyze scene.")
+            return null
+        }
+        return try {
+            // The new API takes a list of Bitmaps
+            val result: TextGenerationResult = llmInference!!.generateResponse(listOf(bitmap), prompt)
+            result.text()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during inference", e)
+            null
         }
     }
 
     fun processFrame(image: ImageProxy) {
         val currentTime = System.currentTimeMillis()
-        
-        // Skip processing if we're too busy or processed recently
-        if (!shouldProcessFrame(currentTime)) {
-            Log.v(TAG, "⏭️ Skipping frame processing (too frequent or LLM not ready)")
+
+        if (currentTime - lastProcessedTime.get() < processingInterval || !isReady()) {
             image.close()
-            Log.v(TAG, "🗑️ Frame discarded (skipped - throttled)")
             return
         }
-
-        Log.d(TAG, "🖼️ Processing new camera frame")
-        // Update last processed time
         lastProcessedTime.set(currentTime)
 
-        // Capture rotation
         val rotation = image.imageInfo.rotationDegrees
 
-        // Process the frame asynchronously using lifecycle scope
         lifecycleOwner.lifecycleScope.launch {
             try {
-                val bitmap = withContext(Dispatchers.IO) {
-                    imageProxyToBitmap(image)
-                }
-                
-                if (bitmap != null && isReady()) {
-                    val response = withContext(Dispatchers.IO) {
-                        llmInferenceTask?.analyzeScene(
-                            bitmap, 
-                            "Analyze this camera feed for people, objects, and safety concerns. For each detected object, output in this exact format:\nDETECTED: name\nBOX: [left,top,right,bottom] (normalized 0-1 from left-top)\nCONFIDENCE: high/medium/low\nRISK: low/medium/high/critical\nSeparate multiple objects with --- Be concise and only output the formatted text."
-                        )
-                    }
-                    
-                    // Parse the LLM response and create detections
+                // The image conversion remains a potential bottleneck, but let's focus on the model first.
+                val bitmap = imageProxyToBitmap(image)
+
+                if (bitmap != null) {
+                    val prompt = "Analyze this camera feed for people, objects, and safety concerns. For each detected object, output in this exact format:\nDETECTED: name\nBOX: [left,top,right,bottom] (normalized 0-1 from left-top)\nCONFIDENCE: high/medium/low\nRISK: low/medium/high/critical\nSeparate multiple objects with --- Be concise and only output the formatted text."
+
+                    // Call our new analyzeScene method
+                    val response = analyzeScene(bitmap, prompt)
+
                     val detections = parseResponseToDetections(response, bitmap.width.toFloat(), bitmap.height.toFloat())
-                    
-                    // Update UI on main thread (we're already on Main due to lifecycleScope)
-                    Log.d(TAG, "📱 Updating UI with ${detections.size} detections")
-                    (context as? MainActivity)?.findViewById<OverlayView>(ai.myapp.R.id.overlay)
-                        ?.setResults(detections, bitmap.height, bitmap.width, rotation)
-                } else {
-                    Log.w(TAG, "⚠️ Skipping inference: bitmap=${bitmap != null}, ready=${isReady()}")
-                    (context as? MainActivity)?.findViewById<OverlayView>(ai.myapp.R.id.overlay)
-                        ?.setResults(emptyList(), bitmap?.height ?: 480, bitmap?.width ?: 640, rotation)
+
+                    // Update UI on main thread
+                    withContext(Dispatchers.Main) {
+                        (context as? MainActivity)?.findViewById<OverlayView>(R.id.overlay)
+                            ?.setResults(detections, bitmap.height, bitmap.width, rotation)
+                    }
+                    // It's good practice to recycle the bitmap if you created a scaled copy
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error processing frame", e)
-                (context as? MainActivity)?.findViewById<OverlayView>(ai.myapp.R.id.overlay)
-                    ?.setResults(emptyList(), image.height, image.width, rotation)
             } finally {
                 image.close()
-                Log.v(TAG, "🗑️ Frame discarded after processing")
             }
         }
     }
 
-    private fun shouldProcessFrame(currentTime: Long): Boolean {
-        val timeSinceLastProcess = currentTime - lastProcessedTime.get()
-        val isTimeOk = timeSinceLastProcess >= processingInterval
-        val isLlmReady = isReady()
-        
-        Log.v(TAG, "⏰ Time check: ${timeSinceLastProcess}ms >= ${processingInterval}ms = $isTimeOk, LLM ready: $isLlmReady")
-        
-        return isTimeOk && isLlmReady
-    }
+    // *** Your other methods (imageProxyToBitmap, parseResponseToDetections, etc.) can remain mostly the same ***
+    // They are well-written for their purpose.
+    // I've included them here for completeness.
 
     private suspend fun imageProxyToBitmap(image: ImageProxy): Bitmap? = withContext(Dispatchers.IO) {
         try {
-            // Get the YUV_420_888 image format
             val yBuffer = image.planes[0].buffer // Y
             val uBuffer = image.planes[1].buffer // U
             val vBuffer = image.planes[2].buffer // V
-
             val ySize = yBuffer.remaining()
             val uSize = uBuffer.remaining()
             val vSize = vBuffer.remaining()
-
             val nv21 = ByteArray(ySize + uSize + vSize)
-
-            // U and V are swapped
             yBuffer.get(nv21, 0, ySize)
             vBuffer.get(nv21, ySize, vSize)
             uBuffer.get(nv21, ySize + vSize, uSize)
-
-            val yuvImage = android.graphics.YuvImage(
-                nv21,
-                android.graphics.ImageFormat.NV21,
-                image.width,
-                image.height,
-                null
-            )
-
+            val yuvImage = android.graphics.YuvImage(nv21, android.graphics.ImageFormat.NV21, image.width, image.height, null)
             val out = java.io.ByteArrayOutputStream()
-            yuvImage.compressToJpeg(
-                android.graphics.Rect(0, 0, image.width, image.height),
-                85, // Quality
-                out
-            )
-
+            yuvImage.compressToJpeg(android.graphics.Rect(0, 0, image.width, image.height), 85, out)
             val imageBytes = out.toByteArray()
             val bitmap = android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-            
-            // Scale down the bitmap for faster processing
-            val scaledBitmap = if (bitmap.width > 640 || bitmap.height > 640) {
-                val scale = 640.0f / maxOf(bitmap.width, bitmap.height)
+            val scale = 640.0f / maxOf(bitmap.width, bitmap.height)
+            if (scale < 1.0) {
                 val matrix = Matrix()
                 matrix.setScale(scale, scale)
-                Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, false)
+                val scaledBitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                bitmap.recycle() // Recycle the original large bitmap
+                scaledBitmap
             } else {
                 bitmap
             }
-            
-            if (scaledBitmap != bitmap) {
-                bitmap.recycle()
-            }
-            
-            scaledBitmap
         } catch (e: Exception) {
             Log.e(TAG, "Error converting ImageProxy to Bitmap", e)
             null
@@ -240,24 +215,19 @@ class GemmaBridge(
     }
 
     private fun parseResponseToDetections(response: String?, imgWidth: Float, imgHeight: Float): List<Detection> {
+        // This function is fine as-is
         if (response.isNullOrEmpty()) {
-            Log.w(TAG, "Empty response received")
             return emptyList()
         }
-
         return try {
             val detections = mutableListOf<Detection>()
-            
-            // Split by separator for multiple objects
             val objects = response.split("---")
-            
             objects.forEach { objText ->
                 val lines = objText.trim().split("\n")
                 var detected = ""
                 var boxStr = ""
                 var confidenceStr = ""
                 var risk = "low"
-                
                 lines.forEach { line ->
                     when {
                         line.startsWith("DETECTED:") -> detected = line.substringAfter("DETECTED:").trim()
@@ -266,23 +236,19 @@ class GemmaBridge(
                         line.startsWith("RISK:") -> risk = line.substringAfter("RISK:").trim()
                     }
                 }
-                
                 if (detected.isNotEmpty() && boxStr.isNotEmpty()) {
-                    // Parse box [left,top,right,bottom]
                     val coords = boxStr.trim(' ', '[', ']').split(",").mapNotNull { it.trim().toFloatOrNull() }
                     if (coords.size == 4) {
                         val left = coords[0] * imgWidth
                         val top = coords[1] * imgHeight
                         val right = coords[2] * imgWidth
                         val bottom = coords[3] * imgHeight
-                        
                         val confidenceValue = when (confidenceStr.lowercase()) {
                             "high" -> 0.9f
                             "medium" -> 0.7f
                             "low" -> 0.5f
                             else -> 0.6f
                         }
-                        
                         detections.add(
                             Detection(
                                 boundingBox = RectF(left, top, right, bottom),
@@ -294,10 +260,6 @@ class GemmaBridge(
                     }
                 }
             }
-            
-            if (detections.isEmpty()) {
-                Log.w(TAG, "No valid objects parsed from response")
-            }
             detections
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing LLM response: $response", e)
@@ -306,13 +268,13 @@ class GemmaBridge(
     }
 
     fun isReady(): Boolean {
-        return isInitialized && llmInferenceTask?.isReady() == true
+        return isInitialized && llmInference != null
     }
 
     fun cleanup() {
         Log.d(TAG, "🧹 Cleaning up GemmaBridge...")
-        llmInferenceTask?.cleanup()
-        llmInferenceTask = null
+        llmInference?.close()
+        llmInference = null
         isInitialized = false
     }
 

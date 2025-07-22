@@ -4,7 +4,13 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.Environment
 import android.util.Log
+
+//import com.google.ai.edge.litert.Accelerator
+//import com.google.ai.edge.litert.CompiledModel
+
 import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.genai.llminference.GraphOptions
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
@@ -56,7 +62,7 @@ class LLMInferenceTask(private val context: Context) {
             // Check if the file exists
             val libraryFile = File(libraryPath)
             if (libraryFile.exists()) {
-                System.load(libraryPath)
+                System.loadLibrary(libraryPath)
                 Log.d(TAG, "✅ Successfully loaded litert_lm_main.android_arm64 from native library directory")
             } else {
                 Log.w(TAG, "⚠️ Native library file not found at: $libraryPath")
@@ -281,11 +287,8 @@ class LLMInferenceTask(private val context: Context) {
             Log.i(TAG, "🔄 Initializing LLM with model: $modelPath")
             
             // Create LLM inference options with simplified configuration
-            // Note: GPU/CPU delegation will be handled automatically by MediaPipe
-            isUsingGPU = false // Will be auto-determined by MediaPipe
-            Log.d(TAG, "✅ Using default delegation (MediaPipe will auto-select best option)")
-            
             // Follow official MediaPipe pattern with GPU acceleration
+
             val options = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(modelPath)
                 .setMaxTokens(512)
