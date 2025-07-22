@@ -19,6 +19,8 @@ import android.view.View
 import android.widget.Button
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
     private lateinit var viewBinding: ActivityMainBinding
@@ -218,7 +220,10 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         if (::gemmaBridge.isInitialized) {
-            gemmaBridge.cleanup()
+            // Call suspend cleanup function in a coroutine
+            lifecycleScope.launch {
+                gemmaBridge.cleanup()
+            }
         }
         cameraExecutor.shutdown()
     }

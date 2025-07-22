@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "ai.myapp"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "ai.myapp"
@@ -35,7 +35,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    
+
     kotlinOptions {
         jvmTarget = "17"
     }
@@ -85,9 +85,5 @@ dependencies {
     // LiteRT NExt for NPU acceleration on Pixel devices
     //implementation("com.google.ai.edge:litert-next-npu-delegate:1.4.0")
 
-//    // Add the MediaPipe dependencies with fixed versions
-//    implementation("com.google.mediapipe:tasks-genai:0.10.25")
-//    implementation("com.google.mediapipe:tasks-vision:latest.release")
-//    implementation("com.google.mediapipe:tasks-text:latest.release")
-//    implementation("com.google.mediapipe:tasks-audio:latest.release")
+    // LiteRT Next for NPU acceleration on Pixel devices
 }
