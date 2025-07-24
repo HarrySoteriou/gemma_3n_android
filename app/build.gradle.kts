@@ -1,3 +1,4 @@
+// plugins block is the first thing in the file.
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -9,16 +10,17 @@ android {
 
     defaultConfig {
         applicationId = "ai.myapp"
-        minSdk = 29
-        targetSdk = 34
+        minSdk = 31
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        
-        ndk {
-            abiFilters += listOf("arm64-v8a")
-        }
+
+        // NPU only supports arm64-v8a
+        ndk { abiFilters.add("arm64-v8a") }
+        // Needed for Qualcomm NPU runtimes
+        // packaging { jniLibs { useLegacyPackaging = true } }
     }
 
     buildTypes {
@@ -30,22 +32,26 @@ android {
             )
         }
     }
-    
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // This is the standard way to set the Kotlin JVM target.
     kotlinOptions {
         jvmTarget = "17"
     }
-    
+
     buildFeatures {
         viewBinding = true
     }
 
-    androidResources {
-        noCompress += "task"
+    // FIX: Using aaptOptions is the modern way.
+    // NOTE: This is only needed if you bundle the model in your assets,
+    // which you are not currently doing. It's good practice to have it.
+    aaptOptions {
+        noCompress.add(".litertlm")
     }
 
     packaging {
@@ -53,37 +59,46 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
-    buildToolsVersion = "34.0.0"
+    buildToolsVersion = rootProject.extra["buildToolsVersion"] as String
 }
 
+
+// NPU runtime libraries
+//dynamicFeatures.add(":litert_npu_runtime_libraries:mediatek_runtime")
+//dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v69")
+//dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v73")
+//dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v75")
+//dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v79")
+
+
+
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.core:core-ktx:1.16.0")
+    implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("com.google.android.material:material:1.12.0")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-    // Coroutines for async processing - compatible with Kotlin 2.2.0
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
-    // Lifecycle KTX for lifecycleScope and coroutine support
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    
+    implementation("androidx.constraintlayout:constraintlayout:2.2.1")
+    // Coroutines for async processing
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    // Lifecycle KTX for lifecycleScope
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.2")
+    implementation("com.google.ai.edge.litert:litert:2.0.1-alpha")
+
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 
     // CameraX dependencies
-    val cameraxVersion = "1.3.4"
+    val cameraxVersion = "1.4.2"
     implementation("androidx.camera:camera-core:${cameraxVersion}")
     implementation("androidx.camera:camera-camera2:${cameraxVersion}")
     implementation("androidx.camera:camera-lifecycle:${cameraxVersion}")
     implementation("androidx.camera:camera-view:${cameraxVersion}")
 
-    // LiteRT for running LLMs like Gemma
-    //implementation("com.google.ai.edge:litert-llm:1.4.0")
-    implementation("com.google.ai.edge.litert:litert:2.0.0-alpha")
-
-    // LiteRT NExt for NPU acceleration on Pixel devices
-    //implementation("com.google.ai.edge:litert-next-npu-delegate:1.4.0")
-
-    // LiteRT Next for NPU acceleration on Pixel devices
+    // --- FIX: Correct LiteRT Next Dependencies ---
+    val liteRtVersion = "2.0.1-alpha"
+    // 1. The core LiteRT Next API (Model, CompiledModel, TensorBuffer)
+    implementation("com.google.ai.edge.litert:litert:${liteRtVersion}")
+    // 2. (CRITICAL) The provider for NPU, GPU, and CPU accelerators. This was missing.
+    //implementation("com.google.ai.edge.litert:litert-builtin-accelerator-provider:${liteRtVersion}")
 }

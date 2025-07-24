@@ -10,18 +10,28 @@ import androidx.camera.core.ImageProxy
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 
-// Updated imports for LiteRT Next
+// Updated imports for LiteRT Next and LiteRT LM
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.BuiltinNpuAcceleratorProvider
+//import com.google.ai.edge.litert.NpuCompatibilityChecker
 import com.google.ai.edge.litert.CompiledModel
 import com.google.ai.edge.litert.Environment
 import com.google.ai.edge.litert.TensorBuffer
+//import com.google.ai.edge.litert.Model
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+//import kotlinx.coroutines.channels.BufferOverflow
+//import kotlinx.coroutines.flow.MutableSharedFlow
+//import kotlinx.coroutines.flow.SharedFlow
+//import kotlinx.coroutines.isActive
 
+import java.io.File
+//import java.nio.ByteBuffer
+//import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicLong
+import androidx.core.graphics.scale
 
 
 class GemmaBridge(
@@ -30,7 +40,7 @@ class GemmaBridge(
 ) {
     companion object {
         private const val TAG = "GemmaBridge"
-        private const val MODEL_PATH = "gemma-3n-E2B-it-int4.task"
+        private const val MODEL_PATH = "/data/local/tmp/llm/gemma-3n-E2B-it-int4.litertlm"
         private const val IMAGE_SIZE = 256 // Standard input size for vision models
         private const val MAX_SEQUENCE_LENGTH = 1024 // Maximum token sequence length
     }
@@ -59,6 +69,17 @@ class GemmaBridge(
 
         lifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
             try {
+                // Check if model exists at the external path
+                val modelFile = File(MODEL_PATH)
+                if (!modelFile.exists()) {
+                    withContext(Dispatchers.Main) {
+                        (context as? MainActivity)?.onModelInitializationFailed("Model file not found at $MODEL_PATH")
+                    }
+                    return@launch
+                }
+                
+                Log.d(TAG, "📁 Loading model directly from: $MODEL_PATH")
+                
                 // Create environment with NPU support
                 val env = Environment.create(BuiltinNpuAcceleratorProvider(context))
 
@@ -70,23 +91,22 @@ class GemmaBridge(
                         Log.d(TAG, "🚀 Attempting initialization with ${accelerator.name} accelerator...")
 
                         withContext(singleThreadDispatcher) {
-                            // *** FIX 1: Correctly create CompiledModel using the direct API. ***
-                            val compiledModelInstance = CompiledModel.create(
-                                context.assets,
-                                MODEL_PATH,
-                                CompiledModel.Options(accelerator), // Use the loop accelerator variable
-                                env
+                            // Then compile it with the accelerator
+                            val model = CompiledModel.create(
+                                filePath=MODEL_PATH,
+                                options=CompiledModel.Options(accelerator),
+                                optionalEnv = env,
                             )
 
                             // Create input/output buffers
-                            val inputs = compiledModelInstance.createInputBuffers()
-                            val outputs = compiledModelInstance.createOutputBuffers()
+                            val inputs = model.createInputBuffers()
+                            val outputs = model.createOutputBuffers()
 
                             // Verify buffer dimensions
                             Log.d(TAG, "📊 Model has ${inputs.size} inputs and ${outputs.size} outputs")
 
                             // If we get here, initialization succeeded
-                            compiledModel = compiledModelInstance
+                            compiledModel = model
                             inputBuffers = inputs
                             outputBuffers = outputs
                             currentAccelerator = accelerator
@@ -145,17 +165,16 @@ class GemmaBridge(
                 // Prepare text prompt (simple tokenization for demo)
                 val tokenizedPrompt = tokenizePrompt(prompt)
 
-                // Write inputs to buffers
-                // Input 0: Image tensor (assuming NHWC format: [1, height, width, channels])
-                // *** FIX 2: Use the 'writeFloat' method to write data to the TensorBuffer. ***
-                if (inputs.size >= 1) {
+                if (inputs.isNotEmpty()) {
+                    // FIX 2: Use the `write(FloatArray)` method to load an entire array into the buffer.
+                    // The `writeFloat(value)` method is for writing only a single float value.
                     inputs[0].writeFloat(preprocessedImage)
                     Log.d(TAG, "📝 Written image data to input buffer 0")
                 }
 
                 // Input 1: Text tokens (if the model expects separate text input)
                 if (inputs.size >= 2) {
-                    // *** FIX 2 (cont.): Use the 'writeFloat' method here as well. ***
+                    // FIX 2 (cont.): Use the `write(FloatArray)` method here as well.
                     inputs[1].writeFloat(tokenizedPrompt)
                     Log.d(TAG, "📝 Written text tokens to input buffer 1")
                 }
@@ -168,7 +187,7 @@ class GemmaBridge(
                 Log.d(TAG, "⚡ Inference completed in ${inferenceTime}ms with ${currentAccelerator?.name}")
 
                 // Read output - assuming text output tokens
-                // *** FIX 3: Use the 'readFloat' method to read data from the TensorBuffer. ***
+                // The `readFloat()` method only reads a single float from the buffer's current position.
                 val outputTokens = outputs[0].readFloat()
 
                 // Convert tokens back to text (simplified decoding)
@@ -189,7 +208,7 @@ class GemmaBridge(
      */
     private fun preprocessImageForGemma(bitmap: Bitmap): FloatArray {
         // Resize bitmap to model's expected input size
-        val resizedBitmap = Bitmap.createScaledBitmap(bitmap, IMAGE_SIZE, IMAGE_SIZE, true)
+        val resizedBitmap = bitmap.scale(IMAGE_SIZE, IMAGE_SIZE)
 
         // Convert to normalized float array (RGB format)
         val pixelCount = IMAGE_SIZE * IMAGE_SIZE
@@ -392,20 +411,4 @@ class GemmaBridge(
         val confidence: Float,
         val classification: String
     )
-
-    // NOTE: The following classes are assumed to exist elsewhere in the app
-    // and are included for context.
-    class MainActivity : android.app.Activity() {
-        fun showLoading() {}
-        fun onModelInitialized() {}
-        fun onModelInitializationFailed(message: String) {}
-    }
-    class OverlayView(context: Context) : android.view.View(context) {
-        fun setResults(detections: List<Detection>, height: Int, width: Int, rotation: Int) {}
-    }
-    object R {
-        object id {
-            const val overlay = 1 // Dummy ID
-        }
-    }
 }
