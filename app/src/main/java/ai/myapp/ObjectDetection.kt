@@ -170,7 +170,7 @@ class ObjectDetection(
                     // Following MediaPipe documentation pattern
                     val options = LlmInferenceOptions.builder()
                         .setModelPath(modelFilePath) // Use copied file path
-                        .setMaxTokens(128) // Reduced from 512 for faster responses
+                        .setMaxTokens(512) // Increased to accommodate image tokens (258) + output tokens
                         .setMaxTopK(20)
                         .setMaxNumImages(1) // Allow one image per session
                         .build()
@@ -221,7 +221,7 @@ class ObjectDetection(
 
         try {
             // Add timeout to prevent hanging (30 seconds - increased to match max inference time)
-            withTimeout(30000L) {
+            val result = withTimeout(30000L) {
                 // Resize image if needed for better performance
                 Log.v(TAG, "🖼️ Checking if image resize is needed...")
                 val originalWidth = image.width
@@ -303,7 +303,18 @@ class ObjectDetection(
                     Log.d(TAG, "✅ Returning result bundle with ${it.detections.size} detections")
                     return@withTimeout it
                 }
+                
+                // If we get here, something went wrong
+                Log.w(TAG, "⚠️ Result bundle is null after inference")
+                return@withTimeout null
             }
+            
+            // If we successfully got a result, return it
+            result?.let {
+                Log.d(TAG, "🎉 Detection successful - returning ${it.detections.size} detections")
+                return@withContext it
+            }
+            
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
             Log.e(TAG, "⏰ Inference timed out after 30 seconds")
             detectorListener?.onError("Inference timed out")
