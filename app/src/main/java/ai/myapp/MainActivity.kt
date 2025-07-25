@@ -243,7 +243,7 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
                                 objectDetection.detectLivestreamFrame(image)
                             }
                         } else {
-                            Log.v(TAG, "⏭️ Skipping frame - model not ready")
+                            Log.w(TAG, "⏭️ Skipping frame - model not ready (isInitialized: ${::objectDetection.isInitialized && objectDetection.isReady()})")
                             image.close()
                         }
                     }

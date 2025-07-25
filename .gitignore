@@ -32,3 +32,4 @@ build/
 app/build/
 .idea/
 local.properties
+app/src/main/assets
