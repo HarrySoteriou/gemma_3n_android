@@ -43,11 +43,13 @@ class ObjectDetection(
     private var modelPath = "gemma-3n-E2B-it-int4.task"
     private var llmInference: LlmInference? = null
     private val lastProcessedTime = AtomicLong(0)
-    private val processingInterval = 2000L // ~0.5 FPS - much slower for heavy LLM
+    private val processingInterval = 5000L // 5 seconds - increased from 2 for heavy LLM
     private var isInitialized = false
     private var currentDelegate: Delegate = Delegate.CPU
     private val singleThreadDispatcher = Dispatchers.IO.limitedParallelism(1, "ModelDispatcher")
     private var isInferenceRunning = false
+    private val inferenceStartTime = AtomicLong(0)
+    private val maxInferenceTime = 20000L // 20 seconds max inference time
 
     // Detection result data class
     data class Detection(
@@ -78,9 +80,20 @@ class ObjectDetection(
     }
 
     fun isReady(): Boolean {
-        val ready = isInitialized && llmInference != null
+        // Check if inference has been running too long and force reset
+        if (isInferenceRunning) {
+            val currentTime = System.currentTimeMillis()
+            val inferenceStarted = inferenceStartTime.get()
+            if (inferenceStarted > 0 && (currentTime - inferenceStarted) > maxInferenceTime) {
+                Log.w(TAG, "🚨 Inference stuck for ${currentTime - inferenceStarted}ms - forcing reset")
+                isInferenceRunning = false
+                inferenceStartTime.set(0)
+            }
+        }
+        
+        val ready = isInitialized && llmInference != null && !isInferenceRunning
         if (!ready) {
-            Log.v(TAG, "🔍 Model not ready - initialized: $isInitialized")
+            Log.v(TAG, "🔍 Model not ready - initialized: $isInitialized, llmInference: ${llmInference != null}, inferenceRunning: $isInferenceRunning")
         }
         return ready
     }
@@ -88,6 +101,14 @@ class ObjectDetection(
     suspend fun cleanup() {
         withContext(singleThreadDispatcher) {
             Log.d(TAG, "🧹 Cleaning up ObjectDetection...")
+            
+            // Force reset any stuck inference
+            if (isInferenceRunning) {
+                Log.w(TAG, "🚨 Forcing reset of stuck inference during cleanup")
+                isInferenceRunning = false
+                inferenceStartTime.set(0)
+            }
+            
             llmInference?.close()
             llmInference = null
             isInitialized = false
@@ -179,37 +200,50 @@ class ObjectDetection(
         }
 
         isInferenceRunning = true
+        inferenceStartTime.set(System.currentTimeMillis())
         Log.d(TAG, "🔍 Starting inference for ${image.width}x${image.height} image")
         val startTime = SystemClock.uptimeMillis()
 
         try {
-            // Add timeout to prevent hanging (30 seconds)
-            withTimeout(30000L) {
+            // Add timeout to prevent hanging (10 seconds - reduced further)
+            withTimeout(10000L) {
+                // Resize image if needed for better performance
+                Log.v(TAG, "🖼️ Checking if image resize is needed...")
+                val resizedImage = resizeBitmapIfNeeded(image)
+                
+                // Show processing info
+                if (resizedImage != image) {
+                    Log.d(TAG, "🔍 Processing resized image: ${image.width}x${image.height} → ${resizedImage.width}x${resizedImage.height}")
+                } else {
+                    Log.d(TAG, "🔍 Processing original image: ${image.width}x${image.height}")
+                }
+                
                 // Convert bitmap to MPImage
-                Log.v(TAG, "🖼️ Converting bitmap to MPImage...")
-                val mpImage = BitmapImageBuilder(image).build()
+                Log.v(TAG, "🔄 Converting ${resizedImage.width}x${resizedImage.height} bitmap to MPImage...")
+                val mpImage = BitmapImageBuilder(resizedImage).build()
 
-            // Create session with vision modality enabled
-            Log.v(TAG, "🔧 Creating LLM session with vision modality...")
-            val sessionOptions = LlmInferenceSessionOptions.builder()
-                .setTopK(10)
-                .setTemperature(0.4f)
-                .setGraphOptions(
-                    GraphOptions.builder()
-                        .setEnableVisionModality(true)
-                        .build()
-                )
-                .build()
+                // Create session with vision modality enabled
+                Log.v(TAG, "🔧 Creating LLM session with vision modality...")
+                val sessionOptions = LlmInferenceSessionOptions.builder()
+                    .setTemperature(0.3f)
+                    .setGraphOptions(
+                        GraphOptions.builder()
+                            .setEnableVisionModality(true)
+                            .build()
+                    )
+                    .build()
 
+                var resultBundle: ResultBundle? = null
+                
                 llmInference?.use { llm ->
                     Log.v(TAG, "💭 Creating inference session...")
                     try {
                         LlmInferenceSession.createFromOptions(llm, sessionOptions).use { session ->
                             Log.v(TAG, "✅ Session created successfully")
                             
-                            // Use a simpler, more direct prompt
+                            // Use a more concise prompt for faster response
                             Log.v(TAG, "📝 Adding prompt to session...")
-                            session.addQueryChunk("What objects do you see in this image? List them.")
+                            session.addQueryChunk("List objects in this image:")
                             
                             Log.v(TAG, "🖼️ Adding image to session...")
                             session.addImage(mpImage)
@@ -227,31 +261,37 @@ class ObjectDetection(
                             
                             Log.d(TAG, "🎯 Detection result (${detections.size} objects): $result")
                             
-                            val resultBundle = ResultBundle(
+                            resultBundle = ResultBundle(
                                 detections = detections,
                                 inferenceTime = inferenceTime,
-                                inputImageHeight = image.height,
-                                inputImageWidth = image.width
+                                inputImageHeight = resizedImage.height,
+                                inputImageWidth = resizedImage.width
                             )
                             
-                            Log.d(TAG, "✅ Returning result bundle with ${detections.size} detections")
-                            isInferenceRunning = false
-                            return@withContext resultBundle
+                            Log.d(TAG, "✅ Created result bundle with ${detections.size} detections")
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "❌ Error during session creation or inference", e)
                         throw e
                     }
                 }
+                
+                // Return the result after use blocks are closed
+                resultBundle?.let {
+                    Log.d(TAG, "✅ Returning result bundle with ${it.detections.size} detections")
+                    return@withTimeout it
+                }
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            Log.e(TAG, "⏰ Inference timed out after 30 seconds")
+            Log.e(TAG, "⏰ Inference timed out after 10 seconds")
             detectorListener?.onError("Inference timed out")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error during detection", e)
             detectorListener?.onError("Detection failed: ${e.message}")
         } finally {
             isInferenceRunning = false
+            inferenceStartTime.set(0)
+            Log.d(TAG, "🔓 Released inference lock")
         }
         
         Log.w(TAG, "⚠️ Detection failed - returning null")
@@ -308,17 +348,20 @@ class ObjectDetection(
             retriever.setDataSource(context, videoUri)
             val firstFrame = retriever.getFrameAtTime(0)
             
-                         if (firstFrame != null) {
-                 // Convert the video frame to ARGB_8888 which is required by MediaPipe
-                 val argb8888Frame = if (firstFrame.config == Bitmap.Config.ARGB_8888) {
-                     firstFrame
-                 } else {
-                     firstFrame.copy(Bitmap.Config.ARGB_8888, false)
-                 }
+            if (firstFrame != null) {
+                // Convert the video frame to ARGB_8888 which is required by MediaPipe
+                val argb8888Frame = if (firstFrame.config == Bitmap.Config.ARGB_8888) {
+                    firstFrame
+                } else {
+                    firstFrame.copy(Bitmap.Config.ARGB_8888, false)
+                }
                 
-                // Process the first frame
+                // Resize frame for better performance
+                val resizedFrame = resizeBitmapIfNeeded(argb8888Frame)
+                
+                // Process the resized frame
                 kotlinx.coroutines.runBlocking {
-                    detectImage(argb8888Frame)
+                    detectImage(resizedFrame)
                 }
             } else {
                 null
@@ -335,8 +378,29 @@ class ObjectDetection(
     suspend fun detectLivestreamFrame(imageProxy: ImageProxy) {
         val currentTime = System.currentTimeMillis()
         
+        // Check if model is ready before any processing
+        if (!isReady()) {
+            if (isInferenceRunning) {
+                // Don't spam logs when inference is running
+                if ((currentTime - lastProcessedTime.get()) > 1000L) { // Log once per second max
+                    Log.v(TAG, "⏸️ Skipping frames - inference in progress")
+                }
+            } else {
+                Log.v(TAG, "⏸️ Skipping frame - model not ready")
+            }
+            imageProxy.close()
+            return
+        }
+        
         // Throttle processing to avoid overwhelming the system
         if (currentTime - lastProcessedTime.get() < processingInterval) {
+            imageProxy.close()
+            return
+        }
+        
+        // Prevent concurrent inference sessions - check here too
+        if (isInferenceRunning) {
+            Log.v(TAG, "⏸️ Skipping frame - inference already running")
             imageProxy.close()
             return
         }
@@ -344,7 +408,7 @@ class ObjectDetection(
         lastProcessedTime.set(currentTime)
         
         try {
-            Log.v(TAG, "📸 Processing camera frame with multimodal detection...")
+            Log.d(TAG, "📸 Processing camera frame with multimodal detection...")
             
             // Check for rotation changes
             if (imageProxy.imageInfo.rotationDegrees != imageRotation) {
@@ -368,13 +432,13 @@ class ObjectDetection(
             Log.v(TAG, "✅ Successfully converted to ${bitmapBuffer.width}x${bitmapBuffer.height} bitmap")
             
             // Process the frame
-            Log.v(TAG, "🎬 Calling detectImage for bitmap processing...")
+            Log.d(TAG, "🎬 Starting object detection...")
             val result = detectImage(bitmapBuffer)
             result?.let { 
-                Log.d(TAG, "📤 Sending results to UI - ${it.detections.size} detections found")
+                Log.d(TAG, "📤 Detection complete - ${it.detections.size} objects found in ${it.inferenceTime}ms")
                 detectorListener?.onResults(it)
             } ?: run {
-                Log.w(TAG, "⚠️ detectImage returned null - no results to display")
+                Log.w(TAG, "⚠️ Detection returned no results")
             }
             
         } catch (e: Exception) {
@@ -492,12 +556,63 @@ class ObjectDetection(
         }
     }
 
+    // Helper function to resize bitmap while maintaining aspect ratio
+    private fun resizeBitmapIfNeeded(bitmap: Bitmap, maxSize: Int = MAX_IMAGE_SIZE): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        
+        // If already small enough, return original
+        if (width <= maxSize && height <= maxSize) {
+            Log.v(TAG, "✅ Image size ${width}x${height} is within limits, no resize needed")
+            return bitmap
+        }
+        
+        // Calculate scale factor to fit within maxSize while maintaining aspect ratio
+        val scaleFactor = minOf(maxSize.toFloat() / width, maxSize.toFloat() / height)
+        val newWidth = (width * scaleFactor).toInt()
+        val newHeight = (height * scaleFactor).toInt()
+        
+        Log.d(TAG, "📏 Resizing image from ${width}x${height} to ${newWidth}x${newHeight} (scale: ${String.format("%.2f", scaleFactor)})")
+        
+        return try {
+            val resized = Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
+            
+            // If we created a new bitmap and it's different from the original, recycle the original
+            if (resized != bitmap) {
+                bitmap.recycle()
+            }
+            
+            Log.v(TAG, "✅ Successfully resized to ${resized.width}x${resized.height}")
+            resized
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error resizing bitmap: ${e.message}", e)
+            bitmap // Return original if resize fails
+        }
+    }
+
+    // Emergency reset for stuck inference
+    fun forceResetInference() {
+        Log.w(TAG, "🚨 Force resetting inference state")
+        isInferenceRunning = false
+        inferenceStartTime.set(0)
+    }
+    
+    // Get current inference status for debugging
+    fun getInferenceStatus(): String {
+        val runningTime = if (isInferenceRunning && inferenceStartTime.get() > 0) {
+            System.currentTimeMillis() - inferenceStartTime.get()
+        } else 0L
+        
+        return "Inference running: $isInferenceRunning, Duration: ${runningTime}ms, Initialized: $isInitialized"
+    }
+
     companion object {
         const val DELEGATE_CPU = 0
         const val DELEGATE_GPU = 1
         const val OTHER_ERROR = 0
         const val GPU_ERROR = 1
         const val TAG = "ObjectDetection"
+        const val MAX_IMAGE_SIZE = 512 // Maximum width/height for processing
     }
 
     // Interface for detection callbacks
