@@ -116,12 +116,23 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
      * Called when object detection model initialization is complete
      */
     fun onModelInitialized() {
-        Log.d(TAG, "✅ Model initialization complete - ready to start camera")
-        isModelInitialized = true
-        loadingMessage.text = "Starting camera..."
+        Log.d(TAG, "✅ Model initialization complete - verifying readiness...")
         
-        // Now safe to start camera since model is loaded
-        startCamera()
+        // Double-check that model is truly ready for streaming
+        if (::objectDetection.isInitialized && objectDetection.isReadyForStreaming()) {
+            isModelInitialized = true
+            loadingMessage.text = "Model ready! Starting camera..."
+            Log.d(TAG, "✅ Model verified ready - starting camera")
+            
+            // Small delay to ensure UI updates
+            lifecycleScope.launch {
+                kotlinx.coroutines.delay(500)
+                startCamera()
+            }
+        } else {
+            Log.w(TAG, "⚠️ Model initialization reported complete but model not ready")
+            onModelInitializationFailed("Model initialization incomplete")
+        }
     }
 
     /**
@@ -156,8 +167,13 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
             
             // Log the detections for debugging
             resultBundle.detections.forEach { detection ->
-                Log.v(TAG, "📋 Detection: ${detection.label} (confidence: ${detection.confidence})")
+                val bboxInfo = detection.boundingBox?.let { bbox ->
+                    " with bbox[${bbox.left}, ${bbox.top}, ${bbox.right}, ${bbox.bottom}]"
+                } ?: " (no bbox)"
+                Log.d(TAG, "📋 Detection: ${detection.label} (confidence: ${detection.confidence})$bboxInfo")
             }
+            
+            Log.d(TAG, "📱 Overlay updated with ${resultBundle.detections.size} detections (image: ${resultBundle.inputImageWidth}x${resultBundle.inputImageHeight})")
         }
     }
 
@@ -211,11 +227,20 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
     fun startCamera() {
         if (!isModelInitialized) {
             Log.w(TAG, "⚠️ Cannot start camera - model not initialized yet")
+            showError("Model not ready for camera")
             return
         }
 
         if (!allPermissionsGranted()) {
             Log.w(TAG, "⚠️ Cannot start camera - permissions not granted")
+            showError("Camera permissions not granted")
+            return
+        }
+
+        // Final check that ObjectDetection is ready for streaming
+        if (!::objectDetection.isInitialized || !objectDetection.isReadyForStreaming()) {
+            Log.w(TAG, "⚠️ Cannot start camera - ObjectDetection not ready for streaming")
+            showError("Object detection model not ready")
             return
         }
 
@@ -236,14 +261,16 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
                 .build()
                 .also {
                     it.setAnalyzer(cameraExecutor) { image ->
-                        // Double-check model is ready before processing
-                        if (objectDetection.isReady()) {
+                        // Triple-check model is ready before processing any frame
+                        if (isModelInitialized && 
+                            ::objectDetection.isInitialized && 
+                            objectDetection.isReady()) {
                             Log.v(TAG, "📸 Processing camera frame with multimodal detection...")
                             lifecycleScope.launch {
                                 objectDetection.detectLivestreamFrame(image)
                             }
                         } else {
-                            Log.w(TAG, "⏭️ Skipping frame - model not ready (isInitialized: ${::objectDetection.isInitialized && objectDetection.isReady()})")
+                            Log.w(TAG, "⏭️ Skipping frame - model not ready (initialized: $isModelInitialized, objectDetectionReady: ${if (::objectDetection.isInitialized) objectDetection.isReady() else false})")
                             image.close()
                         }
                     }

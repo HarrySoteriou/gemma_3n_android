@@ -7,6 +7,7 @@ import android.view.View
 import androidx.core.content.ContextCompat
 import kotlin.math.max
 import kotlin.math.min
+import android.util.Log
 
 class OverlayView @JvmOverloads constructor(
     context: Context,
@@ -56,6 +57,8 @@ class OverlayView @JvmOverloads constructor(
         outputWidth: Int,
         imageRotation: Int
     ) {
+        Log.d("OverlayView", "📊 Setting ${detections.size} detections on overlay (${outputWidth}x${outputHeight}, rotation: ${imageRotation}°)")
+        
         this.detections = detections
         this.outputWidth = outputWidth
         this.outputHeight = outputHeight
@@ -72,6 +75,17 @@ class OverlayView @JvmOverloads constructor(
             width * 1f / rotatedWidthHeight.first,
             height * 1f / rotatedWidthHeight.second
         )
+
+        Log.d("OverlayView", "📏 Overlay view size: ${width}x${height}, scale factor: $scaleFactor")
+        
+        // Log detections with bounding boxes
+        detections.forEachIndexed { index, detection ->
+            if (detection.boundingBox != null) {
+                Log.d("OverlayView", "🎯 Detection $index: ${detection.label} bbox[${detection.boundingBox.left}, ${detection.boundingBox.top}, ${detection.boundingBox.right}, ${detection.boundingBox.bottom}]")
+            } else {
+                Log.d("OverlayView", "📝 Detection $index: ${detection.label} (text only)")
+            }
+        }
 
         invalidate()
     }
@@ -93,6 +107,8 @@ class OverlayView @JvmOverloads constructor(
             // Handle detections with bounding boxes
             detection.boundingBox?.let { boundingBox ->
                 val boxRect = RectF(boundingBox)
+                
+                Log.v("OverlayView", "🎨 Drawing bbox for ${detection.label}: original[${boxRect.left}, ${boxRect.top}, ${boxRect.right}, ${boxRect.bottom}]")
 
                 // Apply rotation matrix
                 val matrix = Matrix()
@@ -110,6 +126,8 @@ class OverlayView @JvmOverloads constructor(
                 val bottom = boxRect.bottom * scaleFactor
                 val left = boxRect.left * scaleFactor
                 val right = boxRect.right * scaleFactor
+
+                Log.v("OverlayView", "🖼️ Final screen coords for ${detection.label}: [${left}, ${top}, ${right}, ${bottom}] (scaleFactor: $scaleFactor)")
 
                 // Draw bounding box
                 val drawableRect = RectF(left, top, right, bottom)
@@ -133,6 +151,8 @@ class OverlayView @JvmOverloads constructor(
 
                 // Draw text
                 canvas.drawText(drawableText, left, top + bounds.height(), textPaint)
+                
+                Log.d("OverlayView", "✅ Drew bounding box for ${detection.label} at screen coords [${left.toInt()}, ${top.toInt()}, ${right.toInt()}, ${bottom.toInt()}]")
             } ?: run {
                 // Handle detections without bounding boxes (LLM text-only descriptions)
                 // Display them as a list on the side

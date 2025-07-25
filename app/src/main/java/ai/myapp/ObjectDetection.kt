@@ -43,13 +43,13 @@ class ObjectDetection(
     private var modelPath = "gemma-3n-E2B-it-int4.task"
     private var llmInference: LlmInference? = null
     private val lastProcessedTime = AtomicLong(0)
-    private val processingInterval = 5000L // 5 seconds - increased from 2 for heavy LLM
+    private val processingInterval = 12000L // 12 seconds - increased from 8 to reduce load
     private var isInitialized = false
     private var currentDelegate: Delegate = Delegate.CPU
     private val singleThreadDispatcher = Dispatchers.IO.limitedParallelism(1, "ModelDispatcher")
     private var isInferenceRunning = false
     private val inferenceStartTime = AtomicLong(0)
-    private val maxInferenceTime = 20000L // 20 seconds max inference time
+    private val maxInferenceTime = 30000L // 30 seconds max inference time (increased from 20)
 
     // Detection result data class
     data class Detection(
@@ -92,9 +92,24 @@ class ObjectDetection(
         }
         
         val ready = isInitialized && llmInference != null && !isInferenceRunning
+        // Only log when state changes or every few seconds to avoid spam
         if (!ready) {
-            Log.v(TAG, "🔍 Model not ready - initialized: $isInitialized, llmInference: ${llmInference != null}, inferenceRunning: $isInferenceRunning")
+            val currentTime = System.currentTimeMillis()
+            val lastLogTime = lastProcessedTime.get()
+            if (currentTime - lastLogTime > 4000L) { // Log state every 4 seconds max
+                Log.v(TAG, "🔍 Model not ready - initialized: $isInitialized, llmExists: ${llmInference != null}, inferenceRunning: $isInferenceRunning")
+            }
         }
+        return ready
+    }
+
+    /**
+     * Check if the model is fully initialized and ready for video streaming
+     * This should be called before starting camera/video capture
+     */
+    fun isReadyForStreaming(): Boolean {
+        val ready = isInitialized && llmInference != null
+        Log.d(TAG, "🎥 Model streaming readiness check: initialized=$isInitialized, llmExists=${llmInference != null}, ready=$ready")
         return ready
     }
 
@@ -155,8 +170,8 @@ class ObjectDetection(
                     // Following MediaPipe documentation pattern
                     val options = LlmInferenceOptions.builder()
                         .setModelPath(modelFilePath) // Use copied file path
-                        .setMaxTokens(512)
-                        .setMaxTopK(40)
+                        .setMaxTokens(128) // Reduced from 512 for faster responses
+                        .setMaxTopK(20)
                         .setMaxNumImages(1) // Allow one image per session
                         .build()
 
@@ -205,17 +220,19 @@ class ObjectDetection(
         val startTime = SystemClock.uptimeMillis()
 
         try {
-            // Add timeout to prevent hanging (10 seconds - reduced further)
-            withTimeout(10000L) {
+            // Add timeout to prevent hanging (30 seconds - increased to match max inference time)
+            withTimeout(30000L) {
                 // Resize image if needed for better performance
                 Log.v(TAG, "🖼️ Checking if image resize is needed...")
+                val originalWidth = image.width
+                val originalHeight = image.height
                 val resizedImage = resizeBitmapIfNeeded(image)
                 
                 // Show processing info
                 if (resizedImage != image) {
-                    Log.d(TAG, "🔍 Processing resized image: ${image.width}x${image.height} → ${resizedImage.width}x${resizedImage.height}")
+                    Log.d(TAG, "🔍 Processing resized image: ${originalWidth}x${originalHeight} → ${resizedImage.width}x${resizedImage.height}")
                 } else {
-                    Log.d(TAG, "🔍 Processing original image: ${image.width}x${image.height}")
+                    Log.d(TAG, "🔍 Processing original image: ${originalWidth}x${originalHeight}")
                 }
                 
                 // Convert bitmap to MPImage
@@ -225,7 +242,7 @@ class ObjectDetection(
                 // Create session with vision modality enabled
                 Log.v(TAG, "🔧 Creating LLM session with vision modality...")
                 val sessionOptions = LlmInferenceSessionOptions.builder()
-                    .setTemperature(0.3f)
+                    .setTemperature(0.1f) // Lower temperature for faster, more focused responses
                     .setGraphOptions(
                         GraphOptions.builder()
                             .setEnableVisionModality(true)
@@ -241,9 +258,9 @@ class ObjectDetection(
                         LlmInferenceSession.createFromOptions(llm, sessionOptions).use { session ->
                             Log.v(TAG, "✅ Session created successfully")
                             
-                            // Use a more concise prompt for faster response
+                            // Use a more specific and concise prompt for faster response
                             Log.v(TAG, "📝 Adding prompt to session...")
-                            session.addQueryChunk("List objects in this image:")
+                            session.addQueryChunk("Detect objects with bounding boxes (format: ObjectName [x1,y1,x2,y2]): 1.")
                             
                             Log.v(TAG, "🖼️ Adding image to session...")
                             session.addImage(mpImage)
@@ -255,11 +272,16 @@ class ObjectDetection(
                             val inferenceTime = SystemClock.uptimeMillis() - startTime
                             Log.d(TAG, "⏱️ Inference completed in ${inferenceTime}ms")
                             
+                            // Warn if inference is taking too long for real-time
+                            if (inferenceTime > 15000) {
+                                Log.w(TAG, "🐌 Slow inference detected (${inferenceTime}ms)")
+                            }
+                            
                             // Parse the result into Detection objects
                             Log.v(TAG, "📄 Parsing LLM response...")
                             val detections = parseDetectionResult(result)
                             
-                            Log.d(TAG, "🎯 Detection result (${detections.size} objects): $result")
+                            Log.d(TAG, "🎯 Detection result (${detections.size} objects found, ${result.length} chars): ${result.take(100)}${if (result.length > 100) "..." else ""}")
                             
                             resultBundle = ResultBundle(
                                 detections = detections,
@@ -283,7 +305,7 @@ class ObjectDetection(
                 }
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            Log.e(TAG, "⏰ Inference timed out after 10 seconds")
+            Log.e(TAG, "⏰ Inference timed out after 30 seconds")
             detectorListener?.onError("Inference timed out")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error during detection", e)
@@ -300,43 +322,158 @@ class ObjectDetection(
 
     // Parse the LLM response into Detection objects
     private fun parseDetectionResult(response: String): List<Detection> {
+        Log.v(TAG, "🔍 Parsing response: ${response.take(200)}${if (response.length > 200) "..." else ""}")
         val detections = mutableListOf<Detection>()
         
-        // Simple parsing - split by lines and look for numbered items
+        // Parse different formats: numbered items, bullet points, and markdown
         val lines = response.split("\n")
-        var itemNumber = 1
         
         for (line in lines) {
             val trimmedLine = line.trim()
-            if (trimmedLine.startsWith("$itemNumber.") || trimmedLine.matches(Regex("^\\d+\\."))) {
-                // Extract object description
-                val objectDescription = trimmedLine.substringAfter(".").trim()
+            var objectDescription = ""
+            var boundingBox: RectF? = null
+            
+            // Handle different formats
+            when {
+                // Numbered items: "1. Object" or "1) Object" - with or without bounding boxes
+                trimmedLine.matches(Regex("^\\d+[.)]\\s*.+")) -> {
+                    val content = trimmedLine.replaceFirst(Regex("^\\d+[.)]\\s*"), "").trim()
+                    val (description, bbox) = extractObjectAndBoundingBox(content)
+                    objectDescription = description
+                    boundingBox = bbox
+                }
+                // Bullet points: "* Object" or "- Object" - with or without bounding boxes
+                trimmedLine.matches(Regex("^[*-]\\s*.+")) -> {
+                    val content = trimmedLine.replaceFirst(Regex("^[*-]\\s*"), "").trim()
+                    val (description, bbox) = extractObjectAndBoundingBox(content)
+                    objectDescription = description
+                    boundingBox = bbox
+                }
+                // Markdown bold items: "* **Object:**" or "- **Object:**"
+                trimmedLine.matches(Regex("^[*-]\\s*\\*\\*.+\\*\\*:?.*")) -> {
+                    // Extract the bold text and description
+                    val boldMatch = Regex("\\*\\*(.+?)\\*\\*:?(.*)").find(trimmedLine)
+                    if (boldMatch != null) {
+                        val objectName = boldMatch.groupValues[1].trim()
+                        val description = boldMatch.groupValues[2].trim()
+                        val fullContent = if (description.isNotEmpty()) {
+                            "$objectName: $description"
+                        } else {
+                            objectName
+                        }
+                        val (cleanDescription, bbox) = extractObjectAndBoundingBox(fullContent)
+                        objectDescription = cleanDescription
+                        boundingBox = bbox
+                    }
+                }
+                // Simple list items that start with common object words
+                trimmedLine.matches(Regex("^(a|an|the|some|several)?\\s*(person|water|fire|door|car|keyboard|mouse|monitor|screen|phone|bottle|cup|book|pen|laptop|computer|desk|chair|headphones|microphone|cable|wire|speaker|camera).*", RegexOption.IGNORE_CASE)) -> {
+                    val (description, bbox) = extractObjectAndBoundingBox(trimmedLine)
+                    objectDescription = description
+                    boundingBox = bbox
+                }
+            }
+            
+            // Add detection if we found a valid object description
+            if (objectDescription.isNotEmpty()) {
+                // Clean up the description - remove extra formatting
+                val cleanDescription = objectDescription
+                    .replace(Regex("\\*\\*(.+?)\\*\\*"), "$1") // Remove markdown bold
+                    .replace(Regex("^(a|an|the)\\s+", RegexOption.IGNORE_CASE), "") // Remove articles
+                    .trim()
                 
-                // Create a detection with the description
-                val detection = Detection(
-                    boundingBox = null, // LLM doesn't provide exact coordinates
-                    label = objectDescription,
-                    confidence = 0.8f, // Default confidence for LLM detection
-                    classification = "LLM_DETECTION"
-                )
-                detections.add(detection)
-                itemNumber++
+                if (cleanDescription.isNotEmpty()) {
+                    val detection = Detection(
+                        boundingBox = boundingBox,
+                        label = cleanDescription,
+                        confidence = if (boundingBox != null) 0.9f else 0.8f, // Higher confidence with bounding box
+                        classification = "LLM_DETECTION"
+                    )
+                    detections.add(detection)
+                }
             }
         }
         
-        // If no numbered items found, treat whole response as one detection
+        // If no structured items found, try to extract object names from the text
         if (detections.isEmpty() && response.isNotBlank()) {
-            detections.add(
-                Detection(
-                    boundingBox = null,
-                    label = response.trim(),
-                    confidence = 0.8f,
-                    classification = "LLM_DETECTION"
-                )
+            // Look for common object patterns in the entire text
+            val objectPatterns = listOf(
+                "person", "water", "fire", "door", "car"
             )
+            
+            val foundObjects = mutableSetOf<String>()
+            for (pattern in objectPatterns) {
+                if (response.contains(pattern, ignoreCase = true)) {
+                    foundObjects.add(pattern.lowercase().replaceFirstChar { it.uppercase() })
+                }
+            }
+            
+            // If we found some objects, add them
+            if (foundObjects.isNotEmpty()) {
+                foundObjects.forEach { objectName ->
+                    detections.add(
+                        Detection(
+                            boundingBox = null,
+                            label = objectName,
+                            confidence = 0.7f, // Lower confidence for pattern matching
+                            classification = "LLM_DETECTION"
+                        )
+                    )
+                }
+            } else {
+                // Fallback: treat whole response as one detection
+                detections.add(
+                    Detection(
+                        boundingBox = null,
+                        label = response.trim(),
+                        confidence = 0.8f,
+                        classification = "LLM_DETECTION"
+                    )
+                )
+            }
         }
         
+        Log.v(TAG, "📋 Parsed ${detections.size} detections: ${detections.map { "${it.label}${if (it.boundingBox != null) " [bbox]" else ""}" }}")
         return detections
+    }
+
+    // Helper function to extract object name and bounding box from a line
+    private fun extractObjectAndBoundingBox(content: String): Pair<String, RectF?> {
+        // Look for bounding box pattern [x1,y1,x2,y2] or (x1,y1,x2,y2)
+        val bboxPattern = Regex("\\[([0-9.]+),([0-9.]+),([0-9.]+),([0-9.]+)\\]|\\(([0-9.]+),([0-9.]+),([0-9.]+),([0-9.]+)\\)")
+        val bboxMatch = bboxPattern.find(content)
+        
+        return if (bboxMatch != null) {
+            // Extract coordinates (handle both bracket formats)
+            val coords = if (bboxMatch.groupValues[1].isNotEmpty()) {
+                // Bracket format [x1,y1,x2,y2]
+                listOf(
+                    bboxMatch.groupValues[1].toFloatOrNull() ?: 0f,
+                    bboxMatch.groupValues[2].toFloatOrNull() ?: 0f,
+                    bboxMatch.groupValues[3].toFloatOrNull() ?: 0f,
+                    bboxMatch.groupValues[4].toFloatOrNull() ?: 0f
+                )
+            } else {
+                // Parenthesis format (x1,y1,x2,y2)
+                listOf(
+                    bboxMatch.groupValues[5].toFloatOrNull() ?: 0f,
+                    bboxMatch.groupValues[6].toFloatOrNull() ?: 0f,
+                    bboxMatch.groupValues[7].toFloatOrNull() ?: 0f,
+                    bboxMatch.groupValues[8].toFloatOrNull() ?: 0f
+                )
+            }
+            
+            // Remove bounding box from object description
+            val objectName = content.replace(bboxPattern, "").trim()
+            val boundingBox = RectF(coords[0], coords[1], coords[2], coords[3])
+            
+            Log.v(TAG, "🎯 Extracted object: '$objectName' with bbox: [${coords[0]}, ${coords[1]}, ${coords[2]}, ${coords[3]}]")
+            
+            Pair(objectName, boundingBox)
+        } else {
+            // No bounding box found, return just the object name
+            Pair(content, null)
+        }
     }
 
     // Detect objects in video frames
@@ -382,8 +519,8 @@ class ObjectDetection(
         if (!isReady()) {
             if (isInferenceRunning) {
                 // Don't spam logs when inference is running
-                if ((currentTime - lastProcessedTime.get()) > 1000L) { // Log once per second max
-                    Log.v(TAG, "⏸️ Skipping frames - inference in progress")
+                if ((currentTime - lastProcessedTime.get()) > 2000L) { // Log once every 2 seconds max
+                    Log.d(TAG, "⏸️ Skipping frames - inference in progress")
                 }
             } else {
                 Log.v(TAG, "⏸️ Skipping frame - model not ready")
@@ -612,7 +749,7 @@ class ObjectDetection(
         const val OTHER_ERROR = 0
         const val GPU_ERROR = 1
         const val TAG = "ObjectDetection"
-        const val MAX_IMAGE_SIZE = 512 // Maximum width/height for processing
+        const val MAX_IMAGE_SIZE = 256 // Reduced from 512 for faster processing
     }
 
     // Interface for detection callbacks
