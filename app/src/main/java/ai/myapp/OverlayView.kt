@@ -14,7 +14,7 @@ class OverlayView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr) {
 
-    private var detections: List<GemmaBridge.Detection> = emptyList()
+    private var detections: List<ObjectDetection.Detection> = emptyList()
     private var boxPaint = Paint()
     private var textBackgroundPaint = Paint()
     private var textPaint = Paint()
@@ -51,7 +51,7 @@ class OverlayView @JvmOverloads constructor(
     }
 
     fun setResults(
-        detections: List<GemmaBridge.Detection>,
+        detections: List<ObjectDetection.Detection>,
         outputHeight: Int,
         outputWidth: Int,
         imageRotation: Int
@@ -79,55 +79,89 @@ class OverlayView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        detections.forEach { detection ->
-            val boxRect = RectF(detection.boundingBox)
-
-            // Apply rotation matrix
-            val matrix = Matrix()
-            matrix.postTranslate(-outputWidth / 2f, -outputHeight / 2f)
-            matrix.postRotate(outputRotate.toFloat())
-            if (outputRotate == 90 || outputRotate == 270) {
-                matrix.postTranslate(outputHeight / 2f, outputWidth / 2f)
-            } else {
-                matrix.postTranslate(outputWidth / 2f, outputHeight / 2f)
-            }
-            matrix.mapRect(boxRect)
-
-            // Scale to view
-            val top = boxRect.top * scaleFactor
-            val bottom = boxRect.bottom * scaleFactor
-            val left = boxRect.left * scaleFactor
-            val right = boxRect.right * scaleFactor
-
-            boxPaint.color = when (detection.classification) {
+        detections.forEachIndexed { index, detection ->
+            // Set color based on classification
+            boxPaint.color = when (detection.classification.lowercase()) {
                 "critical" -> Color.RED
-                "high-risk" -> Color.YELLOW
-                "medium-risk" -> Color.BLUE
-                else -> Color.GREEN
+                "high" -> Color.rgb(255, 165, 0) // Orange
+                "medium" -> Color.YELLOW
+                "low" -> Color.GREEN
+                "llm_detection" -> Color.CYAN
+                else -> Color.WHITE
             }
 
-            // Draw bounding box
-            val drawableRect = RectF(left, top, right, bottom)
-            canvas.drawRect(drawableRect, boxPaint)
+            // Handle detections with bounding boxes
+            detection.boundingBox?.let { boundingBox ->
+                val boxRect = RectF(boundingBox)
 
-            // Create text
-            val drawableText =
-                "${detection.label} (${String.format("%.2f", detection.confidence)}) - ${detection.classification}"
+                // Apply rotation matrix
+                val matrix = Matrix()
+                matrix.postTranslate(-outputWidth / 2f, -outputHeight / 2f)
+                matrix.postRotate(outputRotate.toFloat())
+                if (outputRotate == 90 || outputRotate == 270) {
+                    matrix.postTranslate(outputHeight / 2f, outputWidth / 2f)
+                } else {
+                    matrix.postTranslate(outputWidth / 2f, outputHeight / 2f)
+                }
+                matrix.mapRect(boxRect)
 
-            // Draw text background
-            textBackgroundPaint.getTextBounds(drawableText, 0, drawableText.length, bounds)
-            val textWidth = bounds.width()
-            val textHeight = bounds.height()
-            canvas.drawRect(
-                left,
-                top,
-                left + textWidth + BOUNDING_RECT_TEXT_PADDING,
-                top + textHeight + BOUNDING_RECT_TEXT_PADDING,
-                textBackgroundPaint
-            )
+                // Scale to view
+                val top = boxRect.top * scaleFactor
+                val bottom = boxRect.bottom * scaleFactor
+                val left = boxRect.left * scaleFactor
+                val right = boxRect.right * scaleFactor
 
-            // Draw text
-            canvas.drawText(drawableText, left, top + bounds.height(), textPaint)
+                // Draw bounding box
+                val drawableRect = RectF(left, top, right, bottom)
+                canvas.drawRect(drawableRect, boxPaint)
+
+                // Create text for bounding box detection
+                val drawableText =
+                    "${detection.label} (${String.format("%.2f", detection.confidence)})"
+
+                // Draw text background
+                textBackgroundPaint.getTextBounds(drawableText, 0, drawableText.length, bounds)
+                val textWidth = bounds.width()
+                val textHeight = bounds.height()
+                canvas.drawRect(
+                    left,
+                    top,
+                    left + textWidth + BOUNDING_RECT_TEXT_PADDING,
+                    top + textHeight + BOUNDING_RECT_TEXT_PADDING,
+                    textBackgroundPaint
+                )
+
+                // Draw text
+                canvas.drawText(drawableText, left, top + bounds.height(), textPaint)
+            } ?: run {
+                // Handle detections without bounding boxes (LLM text-only descriptions)
+                // Display them as a list on the side
+                val yPosition = 100f + (index * 80f) // Stack vertically
+                val xPosition = 20f
+                
+                // Create text for description-only detection
+                val drawableText = "${detection.label} (${String.format("%.2f", detection.confidence)})"
+                
+                // Draw text background
+                textBackgroundPaint.getTextBounds(drawableText, 0, drawableText.length, bounds)
+                val textWidth = bounds.width()
+                val textHeight = bounds.height()
+                canvas.drawRect(
+                    xPosition,
+                    yPosition - textHeight,
+                    xPosition + textWidth + BOUNDING_RECT_TEXT_PADDING,
+                    yPosition + BOUNDING_RECT_TEXT_PADDING,
+                    textBackgroundPaint
+                )
+
+                // Draw text
+                canvas.drawText(drawableText, xPosition, yPosition, textPaint)
+                
+                // Draw small indicator circle
+                boxPaint.style = Paint.Style.FILL
+                canvas.drawCircle(xPosition - 15f, yPosition - textHeight/2, 8f, boxPaint)
+                boxPaint.style = Paint.Style.STROKE // Reset to stroke
+            }
         }
     }
 

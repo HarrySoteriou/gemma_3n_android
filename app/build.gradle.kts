@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "ai.myapp"
-    compileSdk = 36
+    compileSdk = 36  // Use stable Android 14 API
 
     defaultConfig {
         applicationId = "ai.myapp"
@@ -20,7 +20,7 @@ android {
         // NPU only supports arm64-v8a
         ndk { abiFilters.add("arm64-v8a") }
         // Needed for Qualcomm NPU runtimes
-        // packaging { jniLibs { useLegacyPackaging = true } }
+        packaging { jniLibs { useLegacyPackaging = true } }
     }
 
     buildTypes {
@@ -38,20 +38,22 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    // This is the standard way to set the Kotlin JVM target.
-    kotlinOptions {
-        jvmTarget = "17"
+    // Modern way to set the Kotlin JVM target
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     buildFeatures {
         viewBinding = true
     }
 
-    // FIX: Using aaptOptions is the modern way.
+    // Modern way to handle asset compression
     // NOTE: This is only needed if you bundle the model in your assets,
     // which you are not currently doing. It's good practice to have it.
-    aaptOptions {
-        noCompress.add(".litertlm")
+    androidResources {
+        noCompress.addAll(listOf(".litertlm", ".task", ".tflite"))
     }
 
     packaging {
@@ -82,8 +84,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     // Lifecycle KTX for lifecycleScope
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.2")
-    implementation("com.google.ai.edge.litert:litert:2.0.1-alpha")
-
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
@@ -95,10 +95,15 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:${cameraxVersion}")
     implementation("androidx.camera:camera-view:${cameraxVersion}")
 
-    // --- FIX: Correct LiteRT Next Dependencies ---
+    // --- MediaPipe Dependencies ---
+    implementation("com.google.mediapipe:tasks-genai:latest.release")
+    implementation("com.google.mediapipe:tasks-vision:latest.release")
+    implementation("com.google.mediapipe:tasks-text:latest.release")
+    implementation("com.google.mediapipe:tasks-audio:latest.release")
+    
+    // --- LiteRT Next Dependencies (for advanced NPU support) ---
     val liteRtVersion = "2.0.1-alpha"
-    // 1. The core LiteRT Next API (Model, CompiledModel, TensorBuffer)
+    // The core LiteRT Next API (includes accelerator providers)
     implementation("com.google.ai.edge.litert:litert:${liteRtVersion}")
-    // 2. (CRITICAL) The provider for NPU, GPU, and CPU accelerators. This was missing.
-    //implementation("com.google.ai.edge.litert:litert-builtin-accelerator-provider:${liteRtVersion}")
+
 }

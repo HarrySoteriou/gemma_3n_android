@@ -22,10 +22,11 @@ import android.widget.TextView
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
     private lateinit var viewBinding: ActivityMainBinding
     private lateinit var cameraExecutor: ExecutorService
-    private lateinit var gemmaBridge: GemmaBridge
+    private lateinit var objectDetection: ObjectDetection
+
     private lateinit var loadingOverlay: View
     private lateinit var loadingProgress: ProgressBar
     private lateinit var loadingMessage: TextView
@@ -52,7 +53,7 @@ class MainActivity : AppCompatActivity() {
             showLoading()
             loadingMessage.text = "Retrying model initialization..."
             isModelInitialized = false
-            gemmaBridge.initializeAsync()
+            initializeModel()
         }
 
         // Initialize camera executor
@@ -81,16 +82,38 @@ class MainActivity : AppCompatActivity() {
         }
 
         loadingMessage.text = "Loading AI model..."
-        Log.d(TAG, "🔄 Creating GemmaBridge...")
-        gemmaBridge = GemmaBridge(this, this) // context, lifecycleOwner
-        Log.d(TAG, "✅ GemmaBridge created successfully")
+        Log.d(TAG, "🔄 Creating ObjectDetection...")
         
-        Log.d(TAG, "🔄 Starting async initialization...")
-        gemmaBridge.initializeAsync()
+        try {
+            // Create ObjectDetection with this as the DetectorListener
+            objectDetection = ObjectDetection(this, this, this)
+            
+            // Initialize the model asynchronously
+            loadingMessage.text = "Initializing multimodal model..."
+            lifecycleScope.launch {
+                try {
+                    objectDetection.initializeAsync()
+                    
+                    // Check if initialization was successful
+                    if (objectDetection.isReady()) {
+                        Log.d(TAG, "✅ ObjectDetection initialized successfully")
+                        onModelInitialized()
+                    } else {
+                        onModelInitializationFailed("Model failed to initialize")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Model initialization failed", e)
+                    onModelInitializationFailed("Model initialization failed: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to create ObjectDetection", e)
+            onModelInitializationFailed("Failed to create ObjectDetection: ${e.message}")
+        }
     }
 
     /**
-     * Called by GemmaBridge when model initialization is complete
+     * Called when object detection model initialization is complete
      */
     fun onModelInitialized() {
         Log.d(TAG, "✅ Model initialization complete - ready to start camera")
@@ -102,12 +125,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Called by GemmaBridge when model initialization fails
+     * Called when object detection model initialization fails
      */
     fun onModelInitializationFailed(errorMsg: String) {
         Log.e(TAG, "❌ Model initialization failed: $errorMsg")
         isModelInitialized = false
         showError("Model initialization failed: $errorMsg")
+    }
+
+    // Implementation of ObjectDetection.DetectorListener interface
+    override fun onError(error: String, errorCode: Int) {
+        Log.e(TAG, "🚨 ObjectDetection error (code: $errorCode): $error")
+        runOnUiThread {
+            // You could show error messages to user here if needed
+            Log.e(TAG, "Detection error: $error")
+        }
+    }
+
+    override fun onResults(resultBundle: ObjectDetection.ResultBundle) {
+        Log.v(TAG, "🎯 Received ${resultBundle.detections.size} detections")
+        
+        runOnUiThread {
+            // Update overlay with detection results
+            viewBinding.overlay.setResults(
+                resultBundle.detections,
+                resultBundle.inputImageHeight,
+                resultBundle.inputImageWidth,
+                resultBundle.inputImageRotation
+            )
+            
+            // Log the detections for debugging
+            resultBundle.detections.forEach { detection ->
+                Log.v(TAG, "📋 Detection: ${detection.label} (confidence: ${detection.confidence})")
+            }
+        }
     }
 
     fun showLoading() {
@@ -186,9 +237,11 @@ class MainActivity : AppCompatActivity() {
                 .also {
                     it.setAnalyzer(cameraExecutor) { image ->
                         // Double-check model is ready before processing
-                        if (gemmaBridge.isReady()) {
-                            Log.v(TAG, "📸 Processing camera frame...")
-                            gemmaBridge.processFrame(image)
+                        if (objectDetection.isReady()) {
+                            Log.v(TAG, "📸 Processing camera frame with multimodal detection...")
+                            lifecycleScope.launch {
+                                objectDetection.detectLivestreamFrame(image)
+                            }
                         } else {
                             Log.v(TAG, "⏭️ Skipping frame - model not ready")
                             image.close()
@@ -202,7 +255,7 @@ class MainActivity : AppCompatActivity() {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(
                     this, cameraSelector, preview, imageAnalyzer)
-                Log.d(TAG, "✅ Camera started successfully with model ready")
+                Log.d(TAG, "✅ Camera started successfully with multimodal object detection")
                 hideLoading()
             } catch(exc: Exception) {
                 Log.e(TAG, "❌ Use case binding failed", exc)
@@ -219,17 +272,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (::gemmaBridge.isInitialized) {
+        if (::objectDetection.isInitialized) {
             // Call suspend cleanup function in a coroutine
             lifecycleScope.launch {
-                gemmaBridge.cleanup()
+                objectDetection.cleanup()
             }
         }
         cameraExecutor.shutdown()
     }
 
     companion object {
-        private const val TAG = "Gemma3N"
+        private const val TAG = "ObjectDetection"
         private const val REQUEST_CODE_PERMISSIONS = 10
         
         private val REQUIRED_PERMISSIONS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

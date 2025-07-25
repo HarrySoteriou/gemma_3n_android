@@ -12,9 +12,9 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         // This is the custom repository for LiteRT Next (NPU) releases
-        maven {
-            url = uri("https://storage.googleapis.com/AIEdge-dev-releases/lite-rt/r/android/")
-        }
+//        maven {
+//            url = uri("https://storage.googleapis.com/AIEdge-dev-releases/lite-rt/r/android/")
+//        }
     }
 }
 
