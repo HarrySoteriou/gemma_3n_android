@@ -43,7 +43,7 @@ class ObjectDetection(
     private var modelPath = "gemma-3n-E2B-it-int4.task"
     private var llmInference: LlmInference? = null
     private val lastProcessedTime = AtomicLong(0)
-    private val processingInterval = 12000L // 12 seconds - increased from 8 to reduce load
+    private val processingInterval = 1000L // 1 second - changed from 12 seconds for 1 FPS sampling
     private var isInitialized = false
     private var currentDelegate: Delegate = Delegate.CPU
     private val singleThreadDispatcher = Dispatchers.IO.limitedParallelism(1, "ModelDispatcher")
@@ -529,9 +529,9 @@ class ObjectDetection(
         // Check if model is ready before any processing
         if (!isReady()) {
             if (isInferenceRunning) {
-                // Don't spam logs when inference is running
-                if ((currentTime - lastProcessedTime.get()) > 2000L) { // Log once every 2 seconds max
-                    Log.d(TAG, "⏸️ Skipping frames - inference in progress")
+                // Frame skipping during inference - don't spam logs
+                if ((currentTime - lastProcessedTime.get()) > 5000L) { // Log once every 5 seconds max
+                    Log.d(TAG, "🎬 Skipping frames during inference (1 FPS sampling active)")
                 }
             } else {
                 Log.v(TAG, "⏸️ Skipping frame - model not ready")
@@ -540,15 +540,17 @@ class ObjectDetection(
             return
         }
         
-        // Throttle processing to avoid overwhelming the system
+        // Frame sampling: process 1 frame per second (1 FPS)
         if (currentTime - lastProcessedTime.get() < processingInterval) {
+            // Frame skipping for 1 FPS sampling
+            Log.v(TAG, "⏭️ Skipping frame for 1 FPS sampling (${currentTime - lastProcessedTime.get()}ms since last)")
             imageProxy.close()
             return
         }
         
-        // Prevent concurrent inference sessions - check here too
+        // Prevent concurrent inference sessions - additional safety check
         if (isInferenceRunning) {
-            Log.v(TAG, "⏸️ Skipping frame - inference already running")
+            Log.w(TAG, "⚠️ Inference running despite isReady() check - skipping frame")
             imageProxy.close()
             return
         }
@@ -556,7 +558,7 @@ class ObjectDetection(
         lastProcessedTime.set(currentTime)
         
         try {
-            Log.d(TAG, "📸 Processing camera frame with multimodal detection...")
+            Log.d(TAG, "📸 Processing camera frame (1 FPS sampling) with multimodal detection...")
             
             // Check for rotation changes
             if (imageProxy.imageInfo.rotationDegrees != imageRotation) {
@@ -567,7 +569,7 @@ class ObjectDetection(
                 return
             }
             
-            // Convert ImageProxy to Bitmap properly
+            // Convert ImageProxy to Bitmap with optimized YUV conversion
             Log.v(TAG, "🔄 Converting ImageProxy (${imageProxy.width}x${imageProxy.height}, format: ${imageProxy.format}) to Bitmap...")
             val bitmapBuffer = imageProxyToBitmap(imageProxy)
             imageProxy.close()
@@ -580,7 +582,7 @@ class ObjectDetection(
             Log.v(TAG, "✅ Successfully converted to ${bitmapBuffer.width}x${bitmapBuffer.height} bitmap")
             
             // Process the frame
-            Log.d(TAG, "🎬 Starting object detection...")
+            Log.d(TAG, "🎬 Starting object detection (frame skipping active during inference)...")
             val result = detectImage(bitmapBuffer)
             result?.let { 
                 Log.d(TAG, "📤 Detection complete - ${it.detections.size} objects found in ${it.inferenceTime}ms")
@@ -629,46 +631,42 @@ class ObjectDetection(
             val uSize = uBuffer.remaining()
             val vSize = vBuffer.remaining()
 
-            val nv21 = ByteArray(ySize + uSize + vSize)
-
-            // Copy Y
-            yBuffer.get(nv21, 0, ySize)
-            
-            // Copy UV
+            // Get the pixel strides and row strides
+            val yPixelStride = imageProxy.planes[0].pixelStride
+            val yRowStride = imageProxy.planes[0].rowStride
             val uvPixelStride = imageProxy.planes[1].pixelStride
-            if (uvPixelStride == 1) {
-                uBuffer.get(nv21, ySize, uSize)
-                vBuffer.get(nv21, ySize + uSize, vSize)
-            } else {
-                // Handle interleaved UV
-                val uvBuffer = ByteArray(uSize + vSize)
-                uBuffer.get(uvBuffer, 0, uSize)
-                vBuffer.get(uvBuffer, uSize, vSize)
-                
-                var uvIndex = 0
-                for (i in 0 until uSize + vSize step uvPixelStride) {
-                    nv21[ySize + uvIndex] = uvBuffer[i]
-                    uvIndex++
+            val uvRowStride = imageProxy.planes[1].rowStride
+
+            val width = imageProxy.width
+            val height = imageProxy.height
+
+            // Create output bitmap
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val pixels = IntArray(width * height)
+
+            // Direct YUV to RGB conversion without JPEG compression
+            for (y in 0 until height) {
+                for (x in 0 until width) {
+                    val yIndex = y * yRowStride + x * yPixelStride
+                    val uvIndex = (y / 2) * uvRowStride + (x / 2) * uvPixelStride
+                    
+                    // Get Y, U, V values
+                    val yValue = (yBuffer.get(yIndex).toInt() and 0xFF) - 16
+                    val uValue = (uBuffer.get(uvIndex).toInt() and 0xFF) - 128
+                    val vValue = (vBuffer.get(uvIndex).toInt() and 0xFF) - 128
+                    
+                    // YUV to RGB conversion using standard formula
+                    var r = ((298 * yValue + 409 * vValue + 128) shr 8).coerceIn(0, 255)
+                    var g = ((298 * yValue - 100 * uValue - 208 * vValue + 128) shr 8).coerceIn(0, 255)
+                    var b = ((298 * yValue + 516 * uValue + 128) shr 8).coerceIn(0, 255)
+                    
+                    // Set pixel (ARGB format)
+                    pixels[y * width + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                 }
             }
-
-            // Convert to RGB bitmap
-            val yuvImage = android.graphics.YuvImage(
-                nv21,
-                android.graphics.ImageFormat.NV21,
-                imageProxy.width,
-                imageProxy.height,
-                null
-            )
-
-            val out = java.io.ByteArrayOutputStream()
-            yuvImage.compressToJpeg(
-                android.graphics.Rect(0, 0, imageProxy.width, imageProxy.height),
-                100,
-                out
-            )
-            val imageBytes = out.toByteArray()
-            android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+            
+            bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+            bitmap
             
         } catch (e: Exception) {
             Log.e(TAG, "Error converting YUV to RGB: ${e.message}", e)
