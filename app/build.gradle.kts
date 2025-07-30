@@ -2,6 +2,8 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("kotlin-kapt") // You need this for dataBinding
+
 }
 
 android {
@@ -11,16 +13,16 @@ android {
     defaultConfig {
         applicationId = "ai.myapp"
         minSdk = 31
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // NPU only supports arm64-v8a
-        ndk { abiFilters.add("arm64-v8a") }
+        //ndk { abiFilters.add("arm64-v8a") }
         // Needed for Qualcomm NPU runtimes
-        packaging { jniLibs { useLegacyPackaging = true } }
+        //packaging { jniLibs { useLegacyPackaging = true } }
     }
 
     buildTypes {
@@ -47,6 +49,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        dataBinding = false
     }
 
     // Modern way to handle asset compression
@@ -61,7 +64,7 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
-    buildToolsVersion = rootProject.extra["buildToolsVersion"] as String
+    //buildToolsVersion = rootProject.extra["buildToolsVersion"] as String
 }
 
 
@@ -96,14 +99,17 @@ dependencies {
     implementation("androidx.camera:camera-view:${cameraxVersion}")
 
     // --- MediaPipe Dependencies ---
-    implementation("com.google.mediapipe:tasks-genai:latest.release")
-    implementation("com.google.mediapipe:tasks-vision:latest.release")
-    implementation("com.google.mediapipe:tasks-text:latest.release")
-    implementation("com.google.mediapipe:tasks-audio:latest.release")
+    implementation("com.google.mediapipe:tasks-genai:0.10.25")
+    //noinspection Aligned16KB
+    implementation("com.google.mediapipe:tasks-vision:0.10.26.1")
     
     // --- LiteRT Next Dependencies (for advanced NPU support) ---
-    val liteRtVersion = "2.0.1-alpha"
     // The core LiteRT Next API (includes accelerator providers)
-    implementation("com.google.ai.edge.litert:litert:${liteRtVersion}")
+    implementation("com.google.ai.edge.litert:litert:1.4.0")
+
+    // Testing
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 
 }

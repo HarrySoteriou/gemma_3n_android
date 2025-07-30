@@ -5,6 +5,10 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.View
+import android.widget.Button
+import android.widget.ProgressBar
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -12,15 +16,11 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import ai.myapp.databinding.ActivityMainBinding
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import android.view.View
-import android.widget.Button
-import android.widget.ProgressBar
-import android.widget.TextView
-import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
     private lateinit var viewBinding: ActivityMainBinding
@@ -32,7 +32,7 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
     private lateinit var loadingMessage: TextView
     private lateinit var errorMessage: TextView
     private lateinit var retryButton: Button
-    
+
     // Track initialization state
     private var isModelInitialized = false
     private var arePermissionsGranted = false
@@ -41,6 +41,9 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
         super.onCreate(savedInstanceState)
         viewBinding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(viewBinding.root)
+
+        // Initialize camera executor
+        cameraExecutor = Executors.newSingleThreadExecutor()
 
         // Initialize loading UI
         loadingOverlay = viewBinding.loadingOverlay
@@ -56,8 +59,6 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
             initializeModel()
         }
 
-        // Initialize camera executor
-        cameraExecutor = Executors.newSingleThreadExecutor()
 
         // Show initial loading
         showLoading()
@@ -86,13 +87,13 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
         
         try {
             // Create ObjectDetection with this as the DetectorListener
-            objectDetection = ObjectDetection(this, this, this)
+            objectDetection = ObjectDetection(context=this, listener=this)
             
             // Initialize the model asynchronously
             loadingMessage.text = "Initializing multimodal model..."
             lifecycleScope.launch {
                 try {
-                    objectDetection.initializeAsync()
+                    objectDetection.initialise()
                     
                     // Check if initialization was successful
                     if (objectDetection.isReady()) {
@@ -119,7 +120,7 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
         Log.d(TAG, "✅ Model initialization complete - verifying readiness...")
         
         // Double-check that model is truly ready for streaming
-        if (::objectDetection.isInitialized && objectDetection.isReadyForStreaming()) {
+        if (::objectDetection.isInitialized && objectDetection.isReady()) {
             isModelInitialized = true
             loadingMessage.text = "Model ready! Starting camera..."
             Log.d(TAG, "✅ Model verified ready - starting camera")
@@ -144,36 +145,30 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
         showError("Model initialization failed: $errorMsg")
     }
 
-    // Implementation of ObjectDetection.DetectorListener interface
-    override fun onError(error: String, errorCode: Int) {
-        Log.e(TAG, "🚨 ObjectDetection error (code: $errorCode): $error")
+    // AFTER
+    override fun onError(msg: String) {
+        Log.e(TAG, "🚨 ObjectDetection error: $msg")
         runOnUiThread {
-            // You could show error messages to user here if needed
-            Log.e(TAG, "Detection error: $error")
+            // You could show error messages to the user here if needed
+            showError("An error occurred: $msg")
         }
     }
 
-    override fun onResults(resultBundle: ObjectDetection.ResultBundle) {
-        Log.v(TAG, "🎯 Received ${resultBundle.detections.size} detections")
-        
-        runOnUiThread {
-            // Update overlay with detection results
-            viewBinding.overlay.setResults(
-                resultBundle.detections,
-                resultBundle.inputImageHeight,
-                resultBundle.inputImageWidth,
-                resultBundle.inputImageRotation
-            )
-            
-            // Log the detections for debugging
-            resultBundle.detections.forEach { detection ->
-                val bboxInfo = detection.boundingBox?.let { bbox ->
-                    " with bbox[${bbox.left}, ${bbox.top}, ${bbox.right}, ${bbox.bottom}]"
-                } ?: " (no bbox)"
-                Log.d(TAG, "📋 Detection: ${detection.label} (confidence: ${detection.confidence})$bboxInfo")
+    // FIX: Handle the nullable ResultBundle correctly
+    override fun onResults(result: ObjectDetection.ResultBundle?) {
+        // This is the main fix for the null-safety errors
+        result?.let {
+            Log.v(TAG, "🎯 Received ${it.detections.size} detections")
+            runOnUiThread {
+                viewBinding.overlay.setResults(
+                    it.detections,
+                    it.inputImageHeight,
+                    it.inputImageWidth,
+                    // NOTE: You still need to add `inputImageRotation` to your ResultBundle
+                    // For now, we'll pass 0 as a placeholder.
+                    0 // it.inputImageRotation
+                )
             }
-            
-            Log.d(TAG, "📱 Overlay updated with ${resultBundle.detections.size} detections (image: ${resultBundle.inputImageWidth}x${resultBundle.inputImageHeight})")
         }
     }
 
@@ -238,7 +233,7 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
         }
 
         // Final check that ObjectDetection is ready for streaming
-        if (!::objectDetection.isInitialized || !objectDetection.isReadyForStreaming()) {
+        if (!::objectDetection.isInitialized || !objectDetection.isReady()) {
             Log.w(TAG, "⚠️ Cannot start camera - ObjectDetection not ready for streaming")
             showError("Object detection model not ready")
             return
