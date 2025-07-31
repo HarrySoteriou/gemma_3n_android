@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import android.view.View
 import android.widget.Button
 import android.widget.ProgressBar
@@ -19,6 +20,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import ai.myapp.databinding.ActivityMainBinding
+import android.util.Size
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -255,7 +258,6 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
             return
         }
 
-        // Final check that ObjectDetection is ready for streaming
         if (!::objectDetection.isInitialized || !objectDetection.isReady()) {
             Log.w(TAG, "⚠️ Cannot start camera - ObjectDetection not ready for streaming")
             showError("Object detection model not ready")
@@ -274,14 +276,26 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
                     it.setSurfaceProvider(viewBinding.viewFinder.surfaceProvider)
                 }
 
+            val resolutionSelector = ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        Size(512, 512),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                    )
+                )
+                .build()
+
             val imageAnalyzer = ImageAnalysis.Builder()
+                // Set the resolution selector
+                .setResolutionSelector(resolutionSelector)
+                // **THIS IS THE FIX: Set the output format to RGBA_8888**
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
                 .also {
                     it.setAnalyzer(cameraExecutor) { image ->
-                        // Triple-check model is ready before processing any frame
-                        if (isModelInitialized && 
-                            ::objectDetection.isInitialized && 
+                        if (isModelInitialized &&
+                            ::objectDetection.isInitialized &&
                             objectDetection.isReady()) {
                             Log.v(TAG, "📸 [3/5] FRAME CAPTURE: Processing camera frame ${image.width}x${image.height} with multimodal detection...")
                             lifecycleScope.launch {
@@ -311,7 +325,6 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
 
         }, ContextCompat.getMainExecutor(this))
     }
-
     private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
         ContextCompat.checkSelfPermission(
             baseContext, it) == PackageManager.PERMISSION_GRANTED

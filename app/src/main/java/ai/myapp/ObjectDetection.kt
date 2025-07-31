@@ -63,43 +63,50 @@ class ObjectDetection(
     }
 
     /* ---------------------------- CameraX entry point ---------------------------- */
-
     @OptIn(ExperimentalGetImage::class)
     suspend fun detectLivestreamFrame(proxy: ImageProxy) {
         val now = System.currentTimeMillis()
-        
+
         if (!isReady()) {
-            Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Model not ready - discarding frame to load next one")
-            proxy.close()
+            Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Model not ready")
+            proxy.close() // Close the proxy immediately if we aren't processing
             return
         }
-        
+
         if (now - lastFrameTs.get() < frameIntervalMs) {
-            Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Too frequent (${now - lastFrameTs.get()}ms < ${frameIntervalMs}ms) - discarding frame to load next one")
-            proxy.close()
+            Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Too frequent")
+            proxy.close() // Close the proxy immediately if we aren't processing
             return
         }
-        
+
         lastFrameTs.set(now)
         Log.v(TAG, "📸 [3/5] FRAME CAPTURE STARTED: Processing camera frame ${proxy.image?.width}x${proxy.image?.height}")
 
-        val mediaImg = proxy.image ?: run { 
-            Log.w(TAG, "⏭️ [5/5] FRAME DISCARDED: Null image - discarding frame to load next one")
+        val mediaImg = proxy.image ?: run {
+            Log.w(TAG, "⏭️ [5/5] FRAME DISCARDED: Null image")
             proxy.close()
             return
         }
 
+        // FIX: Create the MPImage inside a try/finally block
         val mp = MediaImageBuilder(mediaImg).build()
-        proxy.close()
-        Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Camera frame closed, ready to load next one")
 
-        val rotation = proxy.imageInfo.rotationDegrees
-        Log.d(TAG, "🔄 Starting detection inference for frame (rotation: ${rotation}°)...")
-        detectMpImage(mp, rotation).let { 
+        try {
+            val rotation = proxy.imageInfo.rotationDegrees
+            Log.d(TAG, "🔄 Starting detection inference for frame (rotation: ${rotation}°)...")
+
+            // This function takes a long time
+            val results = detectMpImage(mp, rotation)
+
             Log.v(TAG, "📤 Sending detection results to listener...")
-            listener?.onResults(it)
+            listener?.onResults(results)
+
+        } finally {
+            // FIX: Close the MPImage and the ImageProxy AFTER inference is complete.
+            mp.close()
+            proxy.close()
+            Log.v(TAG, "✅ [5/5] FRAME PROCESSED: Frame and MPImage closed, ready for next one.")
         }
-        mp.close()
     }
 
     /* ----------------------------- .mp4 entry point ------------------------------ */
