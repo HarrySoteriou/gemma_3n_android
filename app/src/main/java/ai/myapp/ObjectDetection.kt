@@ -22,7 +22,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicLong
+import androidx.core.graphics.scale
 
 /**
  * ObjectDetection — streamlined for fastest frame ingestion **with single‑time model load**.
@@ -141,7 +144,9 @@ class ObjectDetection(
 
         val start = SystemClock.uptimeMillis()
         Log.d(TAG, "🧠 Starting object detection inference on ${img.width}x${img.height} image...")
-        
+
+        val engine = llm ?: return@withContext null // Get a stable reference
+
         try {
             withTimeout(inferenceTimeoutMs) {
                 val opts = LlmInferenceSessionOptions.builder()
@@ -150,35 +155,33 @@ class ObjectDetection(
                     .build()
                 var bundle: ResultBundle? = null
                 
-                llm!!.use { engine ->
-                    LlmInferenceSession.createFromOptions(engine, opts).use { session ->
-                        Log.v(TAG, "📝 Adding query chunk and image to inference session...")
-                        session.addQueryChunk("Detect objects: 1.")
-                        session.addImage(img)
-                        
-                        Log.v(TAG, "⚡ Generating detection response...")
-                        val raw = session.generateResponse()
-                        val detections = parseDetections(raw)
-                        
-                        val inferenceTime = SystemClock.uptimeMillis() - start
-                        Log.i(TAG, "🎯 [4/5] DETECTION RESULTS: Found ${detections.size} objects in ${inferenceTime}ms")
-                        
-                        detections.forEachIndexed { index, detection ->
-                            Log.d(TAG, "🎯 [4/5] Detection #$index: '${detection.label}' (confidence: ${String.format("%.2f", detection.confidence)}, box: ${detection.boundingBox})")
-                        }
-                        
-                        bundle = ResultBundle(
-                            detections,
-                            inferenceTime,
-                            img.height,
-                            img.width,
-                            imageRotation
-                        )
-                        
-                        Log.v(TAG, "📦 Created ResultBundle with ${detections.size} detections for ${img.width}x${img.height} image")
+                LlmInferenceSession.createFromOptions(engine, opts).use { session ->
+                    Log.v(TAG, "📝 Adding query chunk and image to inference session...")
+                    session.addQueryChunk("Detect objects: 1.")
+                    session.addImage(img)
+
+                    Log.v(TAG, "⚡ Generating detection response...")
+                    val raw = session.generateResponse()
+                    val detections = parseDetections(raw)
+
+                    val inferenceTime = SystemClock.uptimeMillis() - start
+                    Log.i(TAG, "🎯 [4/5] DETECTION RESULTS: Found ${detections.size} objects in ${inferenceTime}ms")
+
+                    detections.forEachIndexed { index, detection ->
+                        Log.d(TAG, "🎯 [4/5] Detection #$index: '${detection.label}' (confidence: ${String.format("%.2f", detection.confidence)}, box: ${detection.boundingBox})")
                     }
+
+                    bundle = ResultBundle(
+                        detections,
+                        inferenceTime,
+                        img.height,
+                        img.width,
+                        imageRotation
+                    )
+
+                    Log.v(TAG, "📦 Created ResultBundle with ${detections.size} detections for ${img.width}x${img.height} image")
                 }
-                return@withTimeout bundle
+            return@withTimeout bundle
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Inference error after ${SystemClock.uptimeMillis() - start}ms", e)
@@ -233,18 +236,54 @@ class ObjectDetection(
         
         if (!out.exists()) {
             Log.w(TAG, "📥 [1/5] MODEL FILE NOT FOUND: $assetName not in internal storage")
-            Log.i(TAG, "📥 [1/5] EXPECTED LOCATION: ${out.absolutePath}")
-            Log.i(TAG, "📥 [1/5] INSTRUCTIONS: Please copy the model file to the device using:")
-            Log.i(TAG, "📥     - Android Studio Device File Explorer, or")  
-            Log.i(TAG, "📥     - ADB: adb push gemma-3n-E2B-it-int4.task /data/data/ai.myapp/files/")
             
-            throw RuntimeException("Model file not found at: ${out.absolutePath}. Please copy the model file to this location.")
+            // Try to copy from /sdcard/
+            val sdcardFile = File("/sdcard/$assetName")
+            Log.i(TAG, "📥 [1/5] CHECKING SDCARD: Looking for model at ${sdcardFile.absolutePath}")
+            
+            if (sdcardFile.exists()) {
+                Log.i(TAG, "📥 [1/5] MODEL FOUND ON SDCARD: Found model file (${sdcardFile.length()} bytes)")
+                Log.i(TAG, "📥 [1/5] COPYING MODEL: Copying from ${sdcardFile.absolutePath} to ${out.absolutePath}")
+                
+                try {
+                    copyFile(sdcardFile, out)
+                    Log.i(TAG, "✅ [1/5] MODEL COPIED SUCCESSFULLY: Model copied to internal storage (${out.length()} bytes)")
+                    Log.i(TAG, "📥 [1/5] MODEL VERIFICATION: File size is ${String.format("%.2f", out.length() / (1024.0 * 1024.0 * 1024.0))} GB")
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ [1/5] MODEL COPY FAILED: Failed to copy model file", e)
+                    throw RuntimeException("Failed to copy model file from SDCard: ${e.message}")
+                }
+            } else {
+                Log.w(TAG, "📥 [1/5] MODEL FILE NOT FOUND: $assetName not found in SDCard either")
+                Log.i(TAG, "📥 [1/5] EXPECTED LOCATIONS:")
+                Log.i(TAG, "📥     - Internal: ${out.absolutePath}")
+                Log.i(TAG, "📥     - SDCard: ${sdcardFile.absolutePath}")
+                Log.i(TAG, "📥 [1/5] INSTRUCTIONS: Please copy the model file to one of these locations:")
+                Log.i(TAG, "📥     - Copy to /sdcard/ and restart the app, or")
+                Log.i(TAG, "📥     - Use Android Studio Device File Explorer, or")  
+                Log.i(TAG, "📥     - ADB: adb push gemma-3n-E2B-it-int4.task /sdcard/")
+                
+                throw RuntimeException("Model file not found. Please copy $assetName to /sdcard/ or internal storage.")
+            }
         } else {
             Log.i(TAG, "📥 [1/5] MODEL FOUND IN INTERNAL MEMORY: Found model file (${out.length()} bytes)")
             Log.i(TAG, "📥 [1/5] MODEL VERIFICATION: File size is ${String.format("%.2f", out.length() / (1024.0 * 1024.0 * 1024.0))} GB")
         }
         
         return out.absolutePath
+    }
+
+    private fun copyFile(source: File, destination: File) {
+        FileInputStream(source).use { inputStream ->
+            FileOutputStream(destination).use { outputStream ->
+                val buffer = ByteArray(8192)
+                var length: Int
+                while (inputStream.read(buffer).also { length = it } > 0) {
+                    outputStream.write(buffer, 0, length)
+                }
+                outputStream.flush()
+            }
+        }
     }
 
     /* ------------------------------- Utilities ------------------------------------ */
@@ -254,7 +293,7 @@ class ObjectDetection(
         if (w <= maxEdge && h <= maxEdge) return src
         val scale = minOf(maxEdge.toFloat() / w, maxEdge.toFloat() / h)
         val nw = (w * scale).toInt(); val nh = (h * scale).toInt()
-        return Bitmap.createScaledBitmap(src, nw, nh, true).also { if (it != src) src.recycle() }
+        return src.scale(nw, nh).also { if (it != src) src.recycle() }
     }
 
     private fun parseDetections(text: String): List<Detection> {

@@ -13,16 +13,20 @@ android {
     defaultConfig {
         applicationId = "ai.myapp"
         minSdk = 31
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // NPU only supports arm64-v8a
-        ndk { abiFilters.add("arm64-v8a") }
+        ndk {
+            abiFilters.add("arm64-v8a")
+        }
         // Needed for Qualcomm NPU runtimes
-        packaging { jniLibs { useLegacyPackaging = true } }
+        packaging {
+            jniLibs { useLegacyPackaging = true }
+        }
     }
 
     buildTypes {
@@ -49,7 +53,6 @@ android {
 
     buildFeatures {
         viewBinding = true
-        dataBinding = true
     }
 
     // Modern way to handle asset compression

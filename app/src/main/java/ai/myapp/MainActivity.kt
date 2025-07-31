@@ -70,10 +70,6 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
 
         Log.e("APP_DEBUG", "🎯 PERMISSIONS CHECK STARTED")
         
-        // TEMPORARY: Skip model initialization for testing
-        hideLoading()
-        Log.e("APP_DEBUG", "✅ SKIPPING MODEL INIT FOR TESTING - APP SHOULD BE VISIBLE NOW")
-        
         // Check permissions first, then initialize model
         if (!allPermissionsGranted()) {
             Log.e("APP_DEBUG", "🔐 Requesting permissions...")
@@ -83,7 +79,7 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
         } else {
             arePermissionsGranted = true
             Log.e("APP_DEBUG", "✅ PERMISSIONS ALREADY GRANTED")
-            // initializeModel() // TEMPORARILY DISABLED
+            initializeModel()
         }
     }
 
