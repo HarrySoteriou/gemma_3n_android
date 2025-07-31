@@ -64,16 +64,38 @@ class ObjectDetection(
     @OptIn(ExperimentalGetImage::class)
     suspend fun detectLivestreamFrame(proxy: ImageProxy) {
         val now = System.currentTimeMillis()
-        if (!isReady() || now - lastFrameTs.get() < frameIntervalMs) { proxy.close(); return }
+        
+        if (!isReady()) {
+            Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Model not ready - discarding frame to load next one")
+            proxy.close()
+            return
+        }
+        
+        if (now - lastFrameTs.get() < frameIntervalMs) {
+            Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Too frequent (${now - lastFrameTs.get()}ms < ${frameIntervalMs}ms) - discarding frame to load next one")
+            proxy.close()
+            return
+        }
+        
         lastFrameTs.set(now)
+        Log.v(TAG, "📸 [3/5] FRAME CAPTURE STARTED: Processing camera frame ${proxy.image?.width}x${proxy.image?.height}")
 
-        val mediaImg = proxy.image ?: run { proxy.close(); return }
+        val mediaImg = proxy.image ?: run { 
+            Log.w(TAG, "⏭️ [5/5] FRAME DISCARDED: Null image - discarding frame to load next one")
+            proxy.close()
+            return
+        }
 
         val mp = MediaImageBuilder(mediaImg).build()
         proxy.close()
+        Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Camera frame closed, ready to load next one")
 
         val rotation = proxy.imageInfo.rotationDegrees
-        detectMpImage(mp, rotation).let { listener?.onResults(it) }
+        Log.d(TAG, "🔄 Starting detection inference for frame (rotation: ${rotation}°)...")
+        detectMpImage(mp, rotation).let { 
+            Log.v(TAG, "📤 Sending detection results to listener...")
+            listener?.onResults(it)
+        }
         mp.close()
     }
 
@@ -103,13 +125,23 @@ class ObjectDetection(
     /* ------------------------------ Core inference ------------------------------- */
 
     private suspend fun detectMpImage(img: MPImage, imageRotation: Int): ResultBundle? = withContext(Dispatchers.IO) {
-        if (llm == null) return@withContext null
+        if (llm == null) {
+            Log.w(TAG, "⚠️ Cannot run detection: LLM is null")
+            return@withContext null
+        }
+        
         synchronized(inferenceLock) {
-            if (inferenceRunning) return@withContext null
-            inferenceRunning = true; inferenceStartedAt.set(System.currentTimeMillis())
+            if (inferenceRunning) {
+                Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Previous inference still running - discarding frame to load next one")
+                return@withContext null
+            }
+            inferenceRunning = true
+            inferenceStartedAt.set(System.currentTimeMillis())
         }
 
         val start = SystemClock.uptimeMillis()
+        Log.d(TAG, "🧠 Starting object detection inference on ${img.width}x${img.height} image...")
+        
         try {
             withTimeout(inferenceTimeoutMs) {
                 val opts = LlmInferenceSessionOptions.builder()
@@ -117,63 +149,101 @@ class ObjectDetection(
                     .setGraphOptions(GraphOptions.builder().setEnableVisionModality(true).build())
                     .build()
                 var bundle: ResultBundle? = null
+                
                 llm!!.use { engine ->
                     LlmInferenceSession.createFromOptions(engine, opts).use { session ->
+                        Log.v(TAG, "📝 Adding query chunk and image to inference session...")
                         session.addQueryChunk("Detect objects: 1.")
                         session.addImage(img)
+                        
+                        Log.v(TAG, "⚡ Generating detection response...")
                         val raw = session.generateResponse()
                         val detections = parseDetections(raw)
-                        // AFTER
+                        
+                        val inferenceTime = SystemClock.uptimeMillis() - start
+                        Log.i(TAG, "🎯 [4/5] DETECTION RESULTS: Found ${detections.size} objects in ${inferenceTime}ms")
+                        
+                        detections.forEachIndexed { index, detection ->
+                            Log.d(TAG, "🎯 [4/5] Detection #$index: '${detection.label}' (confidence: ${String.format("%.2f", detection.confidence)}, box: ${detection.boundingBox})")
+                        }
+                        
                         bundle = ResultBundle(
                             detections,
-                            SystemClock.uptimeMillis() - start,
+                            inferenceTime,
                             img.height,
                             img.width,
-                            // Note: You will need to pass the rotation to this function.
-                            // See the next change. For now, let's assume a variable `imageRotation`.
                             imageRotation
                         )
+                        
+                        Log.v(TAG, "📦 Created ResultBundle with ${detections.size} detections for ${img.width}x${img.height} image")
                     }
                 }
                 return@withTimeout bundle
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Inference error", e)
+            Log.e(TAG, "❌ Inference error after ${SystemClock.uptimeMillis() - start}ms", e)
             listener?.onError("Inference error: ${e.message}")
             null
         } finally {
-            inferenceRunning = false; inferenceStartedAt.set(0)
+            inferenceRunning = false
+            inferenceStartedAt.set(0)
+            Log.v(TAG, "🏁 Inference session completed, ready for next frame")
         }
     }
 
     /* ------------------------------ Model loading -------------------------------- */
 
     private suspend fun loadModelIfNeeded() = withContext(Dispatchers.IO) {
-        if (isInitialised.get() == 1L) return@withContext  // Already loaded
+        if (isInitialised.get() == 1L) {
+            Log.d(TAG, "✅ [2/5] MODEL ALREADY INITIALIZED: Skipping reload")
+            return@withContext  // Already loaded
+        }
+        
         try {
+            Log.i(TAG, "🚀 Starting model initialization process...")
             val path = copyAssetToFile(modelAssetName)
+            
+            Log.i(TAG, "⚙️ [2/5] INITIALIZING MODEL: Creating LlmInference with path: $path")
+            val initStartTime = System.currentTimeMillis()
+            
             val opts = LlmInferenceOptions.builder()
                 .setModelPath(path)
                 .setMaxTokens(512)
                 .setMaxTopK(20)
                 .setMaxNumImages(1)
                 .build()
+                
+            Log.d(TAG, "⚙️ Creating LlmInference with options: maxTokens=512, maxTopK=20, maxImages=1")
             llm = LlmInference.createFromOptions(context, opts)
             isInitialised.set(1)
-            Log.d(TAG, "LLM initialised from $path")
+            
+            val initTime = System.currentTimeMillis() - initStartTime
+            Log.i(TAG, "✅ [2/5] MODEL INITIALIZED SUCCESSFULLY: LLM ready in ${initTime}ms from $path")
+            Log.d(TAG, "🎯 Model is now ready for object detection inference")
+            
         } catch (e: Exception) {
-            Log.e(TAG, "Model init failed", e)
+            Log.e(TAG, "❌ [2/5] MODEL INITIALIZATION FAILED: ${e.message}", e)
             listener?.onError("Model init failed: ${e.message}")
         }
     }
 
     private fun copyAssetToFile(assetName: String): String {
         val out = File(context.filesDir, assetName)
+        Log.i(TAG, "📁 [1/5] CHECKING MODEL LOCATION: ${out.absolutePath}")
+        
         if (!out.exists()) {
-            context.assets.open(assetName).use { input ->
-                out.outputStream().use { output -> input.copyTo(output) }
-            }
+            Log.w(TAG, "📥 [1/5] MODEL FILE NOT FOUND: $assetName not in internal storage")
+            Log.i(TAG, "📥 [1/5] EXPECTED LOCATION: ${out.absolutePath}")
+            Log.i(TAG, "📥 [1/5] INSTRUCTIONS: Please copy the model file to the device using:")
+            Log.i(TAG, "📥     - Android Studio Device File Explorer, or")  
+            Log.i(TAG, "📥     - ADB: adb push gemma-3n-E2B-it-int4.task /data/data/ai.myapp/files/")
+            
+            throw RuntimeException("Model file not found at: ${out.absolutePath}. Please copy the model file to this location.")
+        } else {
+            Log.i(TAG, "📥 [1/5] MODEL FOUND IN INTERNAL MEMORY: Found model file (${out.length()} bytes)")
+            Log.i(TAG, "📥 [1/5] MODEL VERIFICATION: File size is ${String.format("%.2f", out.length() / (1024.0 * 1024.0 * 1024.0))} GB")
         }
+        
         return out.absolutePath
     }
 

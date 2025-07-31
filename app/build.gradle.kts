@@ -20,9 +20,9 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // NPU only supports arm64-v8a
-        //ndk { abiFilters.add("arm64-v8a") }
+        ndk { abiFilters.add("arm64-v8a") }
         // Needed for Qualcomm NPU runtimes
-        //packaging { jniLibs { useLegacyPackaging = true } }
+        packaging { jniLibs { useLegacyPackaging = true } }
     }
 
     buildTypes {
@@ -49,7 +49,7 @@ android {
 
     buildFeatures {
         viewBinding = true
-        dataBinding = false
+        dataBinding = true
     }
 
     // Modern way to handle asset compression

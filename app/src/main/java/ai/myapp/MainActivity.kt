@@ -39,8 +39,12 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.e("APP_DEBUG", "🚀 APP STARTING - MainActivity onCreate() called!")
+        
         viewBinding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(viewBinding.root)
+        
+        Log.e("APP_DEBUG", "🎯 APP LAYOUT SET - UI should be visible now!")
 
         // Initialize camera executor
         cameraExecutor = Executors.newSingleThreadExecutor()
@@ -64,15 +68,22 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
         showLoading()
         loadingMessage.text = "Checking permissions..."
 
+        Log.e("APP_DEBUG", "🎯 PERMISSIONS CHECK STARTED")
+        
+        // TEMPORARY: Skip model initialization for testing
+        hideLoading()
+        Log.e("APP_DEBUG", "✅ SKIPPING MODEL INIT FOR TESTING - APP SHOULD BE VISIBLE NOW")
+        
         // Check permissions first, then initialize model
         if (!allPermissionsGranted()) {
-            Log.d(TAG, "🔐 Requesting permissions...")
+            Log.e("APP_DEBUG", "🔐 Requesting permissions...")
             ActivityCompat.requestPermissions(
                 this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS
             )
         } else {
             arePermissionsGranted = true
-            initializeModel()
+            Log.e("APP_DEBUG", "✅ PERMISSIONS ALREADY GRANTED")
+            // initializeModel() // TEMPORARILY DISABLED
         }
     }
 
@@ -117,21 +128,24 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
      * Called when object detection model initialization is complete
      */
     fun onModelInitialized() {
-        Log.d(TAG, "✅ Model initialization complete - verifying readiness...")
+        Log.i(TAG, "✅ [2/5] MODEL INITIALIZATION CALLBACK: Received model initialization complete signal")
+        Log.d(TAG, "🔍 Verifying model readiness for camera streaming...")
         
         // Double-check that model is truly ready for streaming
         if (::objectDetection.isInitialized && objectDetection.isReady()) {
             isModelInitialized = true
             loadingMessage.text = "Model ready! Starting camera..."
-            Log.d(TAG, "✅ Model verified ready - starting camera")
+            Log.i(TAG, "✅ [2/5] MODEL VERIFIED READY: All checks passed - proceeding to camera startup")
             
             // Small delay to ensure UI updates
             lifecycleScope.launch {
                 kotlinx.coroutines.delay(500)
+                Log.d(TAG, "📹 Initiating camera startup sequence...")
                 startCamera()
             }
         } else {
-            Log.w(TAG, "⚠️ Model initialization reported complete but model not ready")
+            Log.w(TAG, "⚠️ [2/5] MODEL INITIALIZATION INCONSISTENT: Callback received but model not ready")
+            Log.w(TAG, "🔍 Debug info: objectDetection.isInitialized=${::objectDetection.isInitialized}, objectDetection.isReady()=${if (::objectDetection.isInitialized) objectDetection.isReady() else "N/A"}")
             onModelInitializationFailed("Model initialization incomplete")
         }
     }
@@ -140,9 +154,14 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
      * Called when object detection model initialization fails
      */
     fun onModelInitializationFailed(errorMsg: String) {
-        Log.e(TAG, "❌ Model initialization failed: $errorMsg")
+        Log.e(TAG, "❌ [2/5] MODEL INITIALIZATION FAILED: $errorMsg")
         isModelInitialized = false
-        showError("Model initialization failed: $errorMsg")
+        
+        if (errorMsg.contains("Model file not found")) {
+            showError("Model file missing. Please copy gemma-3n-E2B-it-int4.task to device internal storage using Android Studio Device File Explorer.")
+        } else {
+            showError("Model initialization failed: $errorMsg")
+        }
     }
 
     // AFTER
@@ -158,17 +177,25 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
     override fun onResults(result: ObjectDetection.ResultBundle?) {
         // This is the main fix for the null-safety errors
         result?.let {
-            Log.v(TAG, "🎯 Received ${it.detections.size} detections")
+            Log.i(TAG, "🎯 [4/5] DETECTION RESULTS RECEIVED: ${it.detections.size} objects detected in ${it.inferenceTime}ms")
+            Log.d(TAG, "📊 [4/5] Result details: Image ${it.inputImageWidth}x${it.inputImageHeight}, rotation ${it.inputImageRotation}°")
+            
+            it.detections.forEachIndexed { index, detection ->
+                Log.v(TAG, "🎯 [4/5] Object #${index + 1}: '${detection.label}' at ${detection.boundingBox}")
+            }
+            
             runOnUiThread {
+                Log.v(TAG, "🖼️ Updating UI overlay with detection results...")
                 viewBinding.overlay.setResults(
                     it.detections,
                     it.inputImageHeight,
                     it.inputImageWidth,
-                    // NOTE: You still need to add `inputImageRotation` to your ResultBundle
-                    // For now, we'll pass 0 as a placeholder.
-                    0 // it.inputImageRotation
+                    it.inputImageRotation
                 )
+                Log.v(TAG, "✅ UI overlay updated successfully")
             }
+        } ?: run {
+            Log.w(TAG, "⚠️ [4/5] DETECTION RESULTS: Received null result bundle")
         }
     }
 
@@ -260,12 +287,13 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
                         if (isModelInitialized && 
                             ::objectDetection.isInitialized && 
                             objectDetection.isReady()) {
-                            Log.v(TAG, "📸 Processing camera frame with multimodal detection...")
+                            Log.v(TAG, "📸 [3/5] FRAME CAPTURE: Processing camera frame ${image.width}x${image.height} with multimodal detection...")
                             lifecycleScope.launch {
                                 objectDetection.detectLivestreamFrame(image)
                             }
                         } else {
-                            Log.w(TAG, "⏭️ Skipping frame - model not ready (initialized: $isModelInitialized, objectDetectionReady: ${if (::objectDetection.isInitialized) objectDetection.isReady() else false})")
+                            Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Model not ready - skipping frame to load next one")
+                            Log.v(TAG, "🔍 Debug: isModelInitialized=$isModelInitialized, objectDetectionReady=${if (::objectDetection.isInitialized) objectDetection.isReady() else false}")
                             image.close()
                         }
                     }
@@ -277,10 +305,11 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(
                     this, cameraSelector, preview, imageAnalyzer)
-                Log.d(TAG, "✅ Camera started successfully with multimodal object detection")
+                Log.i(TAG, "✅ [3/5] FRAME CAPTURE STARTED: Camera successfully bound with multimodal object detection")
+                Log.d(TAG, "📹 Live camera feed is now active and ready to capture frames")
                 hideLoading()
             } catch(exc: Exception) {
-                Log.e(TAG, "❌ Use case binding failed", exc)
+                Log.e(TAG, "❌ [3/5] FRAME CAPTURE FAILED: Use case binding failed", exc)
                 showError("Failed to start camera: ${exc.message}")
             }
 

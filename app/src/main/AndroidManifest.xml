@@ -24,6 +24,8 @@
         android:roundIcon="@android:drawable/sym_def_app_icon"
         android:supportsRtl="true"
         android:theme="@style/Theme.Gemma3N"
+        android:largeHeap="true"
+        android:hardwareAccelerated="true"
         >
         <activity
             android:name=".MainActivity"
