@@ -286,9 +286,7 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
                 .build()
 
             val imageAnalyzer = ImageAnalysis.Builder()
-                // Set the resolution selector
                 .setResolutionSelector(resolutionSelector)
-                // **THIS IS THE FIX: Set the output format to RGBA_8888**
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
@@ -296,14 +294,24 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
                     it.setAnalyzer(cameraExecutor) { image ->
                         if (isModelInitialized &&
                             ::objectDetection.isInitialized &&
-                            objectDetection.isReady()) {
-                            Log.v(TAG, "📸 [3/5] FRAME CAPTURE: Processing camera frame ${image.width}x${image.height} with multimodal detection...")
+                            objectDetection.isReady()
+                        ) {
+                            Log.v(
+                                TAG,
+                                "📸 [3/5] FRAME CAPTURE: Processing camera frame ${image.width}x${image.height} with multimodal detection..."
+                            )
                             lifecycleScope.launch {
                                 objectDetection.detectLivestreamFrame(image)
                             }
                         } else {
-                            Log.v(TAG, "⏭️ [5/5] FRAME DISCARDED: Model not ready - skipping frame to load next one")
-                            Log.v(TAG, "🔍 Debug: isModelInitialized=$isModelInitialized, objectDetectionReady=${if (::objectDetection.isInitialized) objectDetection.isReady() else false}")
+                            Log.v(
+                                TAG,
+                                "⏭️ [5/5] FRAME DISCARDED: Model not ready - skipping frame to load next one"
+                            )
+                            Log.v(
+                                TAG,
+                                "🔍 Debug: isModelInitialized=$isModelInitialized, objectDetectionReady=${if (::objectDetection.isInitialized) objectDetection.isReady() else false}"
+                            )
                             image.close()
                         }
                     }
@@ -311,20 +319,38 @@ class MainActivity : AppCompatActivity(), ObjectDetection.DetectorListener {
 
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
+            // Create a ViewPort to crop the output to a 1:1 aspect ratio
+            val viewPort = androidx.camera.core.ViewPort.Builder(
+                android.util.Rational(1, 1),
+                preview.targetRotation
+            ).build()
+
+            val useCaseGroup = androidx.camera.core.UseCaseGroup.Builder()
+                .addUseCase(preview)
+                .addUseCase(imageAnalyzer)
+                .setViewPort(viewPort)
+                .build()
+
             try {
                 cameraProvider.unbindAll()
+                // Bind the UseCaseGroup to the lifecycle
                 cameraProvider.bindToLifecycle(
-                    this, cameraSelector, preview, imageAnalyzer)
-                Log.i(TAG, "✅ [3/5] FRAME CAPTURE STARTED: Camera successfully bound with multimodal object detection")
+                    this, cameraSelector, useCaseGroup
+                )
+                Log.i(
+                    TAG,
+                    "✅ [3/5] FRAME CAPTURE STARTED: Camera successfully bound with multimodal object detection"
+                )
                 Log.d(TAG, "📹 Live camera feed is now active and ready to capture frames")
                 hideLoading()
-            } catch(exc: Exception) {
+            } catch (exc: Exception) {
                 Log.e(TAG, "❌ [3/5] FRAME CAPTURE FAILED: Use case binding failed", exc)
                 showError("Failed to start camera: ${exc.message}")
             }
 
         }, ContextCompat.getMainExecutor(this))
     }
+
     private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
         ContextCompat.checkSelfPermission(
             baseContext, it) == PackageManager.PERMISSION_GRANTED
