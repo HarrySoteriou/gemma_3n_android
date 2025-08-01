@@ -2,30 +2,29 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("kotlin-kapt") // You need this for dataBinding
-
+    // Note: kotlin-kapt is not needed for ViewBinding, only for libraries that use annotation processing like Dagger/Hilt or Room.
+    // You can likely remove it if you are not using such libraries.
+    // id("kotlin-kapt")
 }
 
 android {
     namespace = "ai.myapp"
-    compileSdk = 36  // Use stable Android 14 API
+    // It's best practice to align compileSdk and targetSdk.
+    // As of mid-2024, API 34 (Android 14) is the latest stable target.
+    // API 35/36 are for Android 15 Beta/Preview and can be unstable.
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "ai.myapp"
         minSdk = 31
-        targetSdk = 35
+        targetSdk = 34 // Align with compileSdk for stability
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // NPU only supports arm64-v8a
         ndk {
             abiFilters.add("arm64-v8a")
-        }
-        // Needed for Qualcomm NPU runtimes
-        packaging {
-            jniLibs { useLegacyPackaging = true }
         }
     }
 
@@ -44,7 +43,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    // Modern way to set the Kotlin JVM target
     kotlin {
         compilerOptions {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
@@ -55,9 +53,6 @@ android {
         viewBinding = true
     }
 
-    // Modern way to handle asset compression
-    // NOTE: This is only needed if you bundle the model in your assets,
-    // which you are not currently doing. It's good practice to have it.
     androidResources {
         noCompress.addAll(listOf(".litertlm", ".task", ".tflite"))
     }
@@ -67,9 +62,7 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
-    //buildToolsVersion = rootProject.extra["buildToolsVersion"] as String
 }
-
 
 // NPU runtime libraries
 //dynamicFeatures.add(":litert_npu_runtime_libraries:mediatek_runtime")
@@ -78,41 +71,41 @@ android {
 //dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v75")
 //dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v79")
 
-
-
 dependencies {
-    implementation("androidx.core:core-ktx:1.16.0")
-    implementation("androidx.appcompat:appcompat:1.7.1")
+    // Use the latest stable versions
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0") // Note: 1.7.1 had issues, 1.7.0 is safer
     implementation("com.google.android.material:material:1.12.0")
-    implementation("androidx.constraintlayout:constraintlayout:2.2.1")
-    // Coroutines for async processing
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-    // Lifecycle KTX for lifecycleScope
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.2")
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4") // Note: 2.2.x is in alpha
 
-    // CameraX dependencies
-    val cameraxVersion = "1.4.2"
+    // Coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+
+    // Lifecycle KTX
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.3")
+
+    // CameraX dependencies - USE THE BILL OF MATERIALS (BoM)
+    // The BoM ensures that all CameraX modules are version-compatible.
+    val cameraxVersion = "1.3.4" // Use the latest stable version
+    implementation(platform("androidx.camera:camera-bom:$cameraxVersion"))
     implementation("androidx.camera:camera-core:${cameraxVersion}")
     implementation("androidx.camera:camera-camera2:${cameraxVersion}")
     implementation("androidx.camera:camera-lifecycle:${cameraxVersion}")
     implementation("androidx.camera:camera-view:${cameraxVersion}")
 
+
     // --- MediaPipe Dependencies ---
     implementation("com.google.mediapipe:tasks-genai:0.10.25")
     //noinspection Aligned16KB
     implementation("com.google.mediapipe:tasks-vision:0.10.26.1")
-    
+
     // --- LiteRT Next Dependencies (for advanced NPU support) ---
     // The core LiteRT Next API (includes accelerator providers)
     implementation("com.google.ai.edge.litert:litert:1.4.0")
 
-    // Testing
+    // Testing - Consolidate duplicate dependencies
     testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }
