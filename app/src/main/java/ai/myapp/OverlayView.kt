@@ -28,9 +28,9 @@ class OverlayView @JvmOverloads constructor(
     private var outputHeight = 0
     private var outputRotate = 0
 
-    init {
-        initPaints()
-    }
+    private val boxRect = RectF()
+    private val matrix = Matrix()
+    private val drawableRect = RectF()
 
     private fun initPaints() {
         textBackgroundPaint.color = Color.BLACK
@@ -44,7 +44,9 @@ class OverlayView @JvmOverloads constructor(
         boxPaint.strokeWidth = 8f
         boxPaint.style = Paint.Style.STROKE
     }
-
+    init {
+        initPaints()
+    }
     fun clear() {
         detections = emptyList()
         textPaint.reset()
@@ -109,12 +111,12 @@ class OverlayView @JvmOverloads constructor(
 
             // Handle detections with bounding boxes
             detection.boundingBox?.let { boundingBox ->
-                val boxRect = RectF(boundingBox)
+                boxRect.set(boundingBox)
                 
                 Log.v("OverlayView", "🎨 Drawing bbox for ${detection.label}: original[${boxRect.left}, ${boxRect.top}, ${boxRect.right}, ${boxRect.bottom}]")
 
                 // Apply rotation matrix
-                val matrix = Matrix()
+                matrix.reset()
                 matrix.postTranslate(-outputWidth / 2f, -outputHeight / 2f)
                 matrix.postRotate(outputRotate.toFloat())
                 if (outputRotate == 90 || outputRotate == 270) {
@@ -133,24 +135,23 @@ class OverlayView @JvmOverloads constructor(
                 Log.v("OverlayView", "🖼️ Final screen coords for ${detection.label}: [${left}, ${top}, ${right}, ${bottom}] (scaleFactor: $scaleFactor)")
 
                 // Draw bounding box
-                val drawableRect = RectF(left, top, right, bottom)
+                drawableRect.set(left, top, right, bottom)
                 canvas.drawRect(drawableRect, boxPaint)
 
                 // Create text for bounding box detection
-                val drawableText =
-                    "${detection.label} (${String.format("%.2f", detection.confidence)})"
+                val drawableText = "${detection.label} (${String.format("%.2f", detection.confidence)})"
 
                 // Draw text background
                 textBackgroundPaint.getTextBounds(drawableText, 0, drawableText.length, bounds)
                 val textWidth = bounds.width()
                 val textHeight = bounds.height()
-                canvas.drawRect(
+                drawableRect.set(
                     left,
                     top,
                     left + textWidth + BOUNDING_RECT_TEXT_PADDING,
-                    top + textHeight + BOUNDING_RECT_TEXT_PADDING,
-                    textBackgroundPaint
+                    top + textHeight + BOUNDING_RECT_TEXT_PADDING
                 )
+                canvas.drawRect(drawableRect, textBackgroundPaint)
 
                 // Draw text
                 canvas.drawText(drawableText, left, top + bounds.height(), textPaint)
@@ -169,14 +170,14 @@ class OverlayView @JvmOverloads constructor(
                 textBackgroundPaint.getTextBounds(drawableText, 0, drawableText.length, bounds)
                 val textWidth = bounds.width()
                 val textHeight = bounds.height()
-                canvas.drawRect(
+                // REUSE drawableRect here as well
+                drawableRect.set(
                     xPosition,
                     yPosition - textHeight,
                     xPosition + textWidth + BOUNDING_RECT_TEXT_PADDING,
-                    yPosition + BOUNDING_RECT_TEXT_PADDING,
-                    textBackgroundPaint
+                    yPosition + BOUNDING_RECT_TEXT_PADDING
                 )
-
+                canvas.drawRect(drawableRect, textBackgroundPaint)
                 // Draw text
                 canvas.drawText(drawableText, xPosition, yPosition, textPaint)
                 

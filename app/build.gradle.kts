@@ -88,7 +88,6 @@ dependencies {
     // CameraX dependencies - USE THE BILL OF MATERIALS (BoM)
     // The BoM ensures that all CameraX modules are version-compatible.
     val cameraxVersion = "1.3.4" // Use the latest stable version
-    implementation(platform("androidx.camera:camera-bom:$cameraxVersion"))
     implementation("androidx.camera:camera-core:${cameraxVersion}")
     implementation("androidx.camera:camera-camera2:${cameraxVersion}")
     implementation("androidx.camera:camera-lifecycle:${cameraxVersion}")
