@@ -111,9 +111,16 @@ class OverlayView @JvmOverloads constructor(
 
             // Handle detections with bounding boxes
             detection.boundingBox?.let { boundingBox ->
-                boxRect.set(boundingBox)
+                // Convert normalized coordinates (0.0-1.0) to pixel coordinates with rounding
+                val pixelLeft = kotlin.math.round(boundingBox.left * outputWidth)
+                val pixelTop = kotlin.math.round(boundingBox.top * outputHeight)
+                val pixelRight = kotlin.math.round(boundingBox.right * outputWidth)
+                val pixelBottom = kotlin.math.round(boundingBox.bottom * outputHeight)
                 
-                Log.v("OverlayView", "🎨 Drawing bbox for ${detection.label}: original[${boxRect.left}, ${boxRect.top}, ${boxRect.right}, ${boxRect.bottom}]")
+                boxRect.set(pixelLeft, pixelTop, pixelRight, pixelBottom)
+                
+                Log.v("OverlayView", "🎨 Drawing bbox for ${detection.label}: original[${boundingBox.left}, ${boundingBox.top}, ${boundingBox.right}, ${boundingBox.bottom}]")
+                Log.v("OverlayView", "🎨 Converted to pixels: [${pixelLeft}, ${pixelTop}, ${pixelRight}, ${pixelBottom}]")
 
                 // Apply rotation matrix
                 matrix.reset()
@@ -126,11 +133,11 @@ class OverlayView @JvmOverloads constructor(
                 }
                 matrix.mapRect(boxRect)
 
-                // Scale to view
-                val top = boxRect.top * scaleFactor
-                val bottom = boxRect.bottom * scaleFactor
-                val left = boxRect.left * scaleFactor
-                val right = boxRect.right * scaleFactor
+                // Scale to view with rounding to avoid floating point precision issues
+                val top = kotlin.math.round(boxRect.top * scaleFactor)
+                val bottom = kotlin.math.round(boxRect.bottom * scaleFactor)
+                val left = kotlin.math.round(boxRect.left * scaleFactor)
+                val right = kotlin.math.round(boxRect.right * scaleFactor)
 
                 Log.v("OverlayView", "🖼️ Final screen coords for ${detection.label}: [${left}, ${top}, ${right}, ${bottom}] (scaleFactor: $scaleFactor)")
 
@@ -153,7 +160,7 @@ class OverlayView @JvmOverloads constructor(
                 )
                 canvas.drawRect(drawableRect, textBackgroundPaint)
 
-                // Draw text
+                // Draw text with rounded positioning
                 canvas.drawText(drawableText, left, top + bounds.height(), textPaint)
                 
                 Log.d("OverlayView", "✅ Drew bounding box for ${detection.label} at screen coords [${left.toInt()}, ${top.toInt()}, ${right.toInt()}, ${bottom.toInt()}]")

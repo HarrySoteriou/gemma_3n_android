@@ -23,6 +23,7 @@
         android:theme="@style/Theme.Gemma3N"
         android:largeHeap="true"
         android:hardwareAccelerated="true"
+        android:vmSafeMode="false"
         >
         <activity
             android:name=".MainActivity"

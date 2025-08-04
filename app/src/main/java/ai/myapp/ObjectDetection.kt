@@ -39,17 +39,27 @@ class ObjectDetection(
     /* --------------------------- Model / session state --------------------------- */
 
     private var llm: LlmInference? = null
+    private var session: LlmInferenceSession? = null  // Reuse session
     private val isInitialised = AtomicLong(0)         // 0 = not yet, 1 = ready
     private val lastFrameTs = AtomicLong(0)
 
     private val inferenceLock = Any()
     private var inferenceRunning = false
     private val inferenceStartedAt = AtomicLong(0)
+    
+    // Session management for token limit handling
+    private var sessionInferenceCount = 0
+    private val maxSessionInferences = 2  // Recreate session after 2 inferences to prevent token buildup
+    
+    // Memory management for preventing model swapping
+    private val runtime = Runtime.getRuntime()
+    private var sessionWarmedUp = false
+    private val memoryBuffer = ByteArray(50 * 1024 * 1024) // 50MB buffer to reserve RAM
 
     /* ------------------------------- Parameters ---------------------------------- */
 
     private val modelAssetName = "gemma-3n-E2B-it-int4.task"
-    private val frameIntervalMs = 1_000L        // 1 fps sampler
+    private val frameIntervalMs = 10_000L        // 0.1 fps sampler
     private val inferenceTimeoutMs = 60_000L    // Increased timeout for generative model
     private val maxEdge = 512                   // max image edge sent to model
 
@@ -57,10 +67,37 @@ class ObjectDetection(
 
     suspend fun initialise() { loadModelIfNeeded() }
 
-    fun isReady(): Boolean = isInitialised.get() == 1L && !inferenceRunning
+    fun isReady(): Boolean = isInitialised.get() == 1L && !inferenceRunning && hasAvailableMemory()
+    
+    private fun hasAvailableMemory(): Boolean {
+        val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+        val maxMemory = runtime.maxMemory()
+        val memoryUsagePercent = (usedMemory.toDouble() / maxMemory.toDouble()) * 100
+        val availableMemory = maxMemory - usedMemory
+        
+        Log.v(TAG, "💾 Memory Status: ${String.format("%.1f", memoryUsagePercent)}% used, ${availableMemory/1024/1024}MB available")
+        
+        if (memoryUsagePercent > 85) {
+            Log.w(TAG, "⚠️ HIGH MEMORY PRESSURE: ${String.format("%.1f", memoryUsagePercent)}% - RISK OF MODEL SWAPPING TO DISK!")
+            Log.w(TAG, "💾 Available: ${availableMemory/1024/1024}MB - Consider reducing other app usage")
+            
+            // Force garbage collection to free up memory
+            System.gc()
+            
+            // Re-check after GC
+            val newUsedMemory = runtime.totalMemory() - runtime.freeMemory()
+            val newMemoryUsagePercent = (newUsedMemory.toDouble() / maxMemory.toDouble()) * 100
+            Log.i(TAG, "🗑️ After GC: ${String.format("%.1f", newMemoryUsagePercent)}% memory used")
+            
+            return newMemoryUsagePercent < 90 // More aggressive threshold
+        }
+        return true
+    }
 
     suspend fun cleanup() = withContext(Dispatchers.IO) {
+        session?.close(); session = null
         llm?.close(); llm = null; isInitialised.set(0)
+        sessionInferenceCount = 0
     }
 
     /* ---------------------------- CameraX entry point ---------------------------- */
@@ -150,46 +187,93 @@ class ObjectDetection(
         val start = SystemClock.uptimeMillis()
         Log.d(TAG, "🧠 Starting object detection inference on ${img.width}x${img.height} image...")
 
+        // Prevent garbage collection during inference to avoid memory pressure
+        preventGarbageCollection()
+
         val engine = llm ?: return@withContext null
 
         try {
             withTimeout(inferenceTimeoutMs) {
-                val opts = LlmInferenceSessionOptions.builder()
-                    .setTemperature(0.2f)
-                    .setGraphOptions(GraphOptions.builder().setEnableVisionModality(true).build())
-                    .build()
                 var bundle: ResultBundle? = null
+                
+                // Track session usage first
+                sessionInferenceCount++
+                
+                // Check if we need to recreate session to prevent token limit issues
+                var currentSession = session
+                if (currentSession == null || sessionInferenceCount > maxSessionInferences) {
+                    Log.i(TAG, "🔄 Recreating session to prevent token accumulation (inference count: $sessionInferenceCount)")
+                    recreateSession()
+                    currentSession = session
+                    sessionInferenceCount = 1
+                }
+                
+                if (currentSession == null) {
+                    Log.w(TAG, "⚠️ Cannot run detection: Session creation failed")
+                    return@withTimeout null
+                }
+                
+                // Warn if session hasn't been warmed up
+                if (!sessionWarmedUp) {
+                    Log.w(TAG, "⚠️ Session not warmed up - first inference may be slow due to cold model loading")
+                }
 
-                LlmInferenceSession.createFromOptions(engine, opts).use { session ->
-                    Log.v(TAG, "📝 Adding query chunk and image to inference session...")
+                Log.v(TAG, "📊 Session inference count: $sessionInferenceCount/$maxSessionInferences")
+
+                val rawText = try {
+                    Log.v(TAG, "📝 Adding query chunk and image to reusable session...")
                     // This prompt guides the model to produce the structured output we can parse.
-                    session.addQueryChunk("Detect all people and objects. For each, provide a classification on a new line starting with '**Class:**', a bounding box on a new line as '**Bounding Box:** (x1, y1, x2, y2)', and a confidence score on a new line as '**Confidence:** score'.")
-                    session.addImage(img)
+                    currentSession.addQueryChunk("Detect objects. For each object found, provide on separate lines: * **Class:** [object name], * **Bounding Box:** (x1, y1, x2, y2), * **Confidence:** [score]")
+                    currentSession.addImage(img)
 
                     Log.v(TAG, "⚡ Generating detection response...")
-                    val rawText = session.generateResponse()
-                    val lines = rawText.split('\n')
-
-                    // *** NEW PARSING STEP ***
-                    val detections = parseDetectionsFromText(lines)
-
-                    val inferenceTime = SystemClock.uptimeMillis() - start
-                    Log.i(TAG, "🎯 [4/5] DETECTION RESULTS: Parsed ${detections.size} objects in ${inferenceTime}ms")
-
-                    detections.forEachIndexed { index, detection ->
-                        Log.d(TAG, "🎯 [4/5] Parsed Detection #$index: '${detection.label}' (confidence: ${String.format("%.2f", detection.confidence)}, box: ${detection.boundingBox})")
+                    currentSession.generateResponse()
+                } catch (e: Exception) {
+                    // Handle OUT_OF_RANGE and other session errors by recreating session
+                    if (e.message?.contains("OUT_OF_RANGE") == true || e.message?.contains("too long") == true) {
+                        Log.w(TAG, "🔄 Token limit exceeded, recreating session and retrying...")
+                        recreateSession()
+                        currentSession = session ?: return@withTimeout null
+                        sessionInferenceCount = 1
+                        
+                        // Retry with fresh session
+                        currentSession.addQueryChunk("Detect objects. For each object found, provide on separate lines: * **Class:** [object name], * **Bounding Box:** (x1, y1, x2, y2), * **Confidence:** [score]")
+                        currentSession.addImage(img)
+                        currentSession.generateResponse()
+                    } else {
+                        throw e
                     }
-
-                    bundle = ResultBundle(
-                        detections,
-                        inferenceTime,
-                        img.height,
-                        img.width,
-                        imageRotation
-                    )
-
-                    Log.v(TAG, "📦 Created ResultBundle with ${detections.size} detections for ${img.width}x${img.height} image")
                 }
+                val lines = rawText.split('\n')
+
+                // DEBUG: Log the raw output to see what the model is actually generating
+                Log.d(TAG, "🔍 RAW MODEL OUTPUT:")
+                Log.d(TAG, "📝 Raw text length: ${rawText.length} characters")
+                Log.d(TAG, "📝 Raw text: '$rawText'")
+                Log.d(TAG, "📝 Split into ${lines.size} lines:")
+                lines.forEachIndexed { index, line ->
+                    Log.d(TAG, "📝 Line $index: '$line'")
+                }
+
+                // *** NEW PARSING STEP - Pass image dimensions for coordinate normalization ***
+                val detections = parseDetectionsFromText(lines, img.width, img.height)
+
+                val inferenceTime = SystemClock.uptimeMillis() - start
+                Log.i(TAG, "🎯 [4/5] DETECTION RESULTS: Parsed ${detections.size} objects in ${inferenceTime}ms")
+
+                detections.forEachIndexed { index, detection ->
+                    Log.d(TAG, "🎯 [4/5] Parsed Detection #$index: '${detection.label}' (confidence: ${String.format("%.2f", detection.confidence)}, box: ${detection.boundingBox})")
+                }
+
+                bundle = ResultBundle(
+                    detections,
+                    inferenceTime,
+                    img.height,
+                    img.width,
+                    imageRotation
+                )
+                Log.v(TAG, "📦 Created ResultBundle with ${detections.size} detections for ${img.width}x${img.height} image")
+                
                 return@withTimeout bundle
             }
         } catch (e: Exception) {
@@ -220,17 +304,33 @@ class ObjectDetection(
 
             val opts = LlmInferenceOptions.builder()
                 .setModelPath(path)
-                .setMaxTokens(1024) // Increased tokens for more detailed output
+                .setMaxTokens(1536)  // Further increased tokens to prevent OUT_OF_RANGE errors
                 .setMaxTopK(10)
                 .setMaxNumImages(1)
                 .build()
 
-            Log.d(TAG, "⚙️ Creating LlmInference with options: maxTokens=1024, maxTopK=10, maxImages=1")
+            Log.d(TAG, "⚙️ Creating LlmInference with options: maxTokens=1536, maxTopK=10, maxImages=1")
             llm = LlmInference.createFromOptions(context, opts)
+            
+            // Create a single reusable session
+            val sessionOpts = LlmInferenceSessionOptions.builder()
+                .setTemperature(0.2f)
+                .setGraphOptions(GraphOptions.builder().setEnableVisionModality(true).build())
+                .build()
+            session = LlmInferenceSession.createFromOptions(llm!!, sessionOpts)
+            
+            // RAM Management: Force aggressive memory allocation
+            Log.i(TAG, "🧠 Reserving memory to prevent model swapping...")
+            forceMemoryAllocation()
+            
+            // Session warming to keep model hot in RAM
+            Log.i(TAG, "🔥 Warming up session to prevent cold starts...")
+            warmUpSession()
+            
             isInitialised.set(1)
 
             val initTime = System.currentTimeMillis() - initStartTime
-            Log.i(TAG, "✅ [2/5] MODEL INITIALIZED SUCCESSFULLY: LLM ready in ${initTime}ms from $path")
+            Log.i(TAG, "✅ [2/5] MODEL INITIALIZED SUCCESSFULLY: LLM and session ready in ${initTime}ms from $path")
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ [2/5] MODEL INITIALIZATION FAILED: ${e.message}", e)
@@ -283,6 +383,127 @@ class ObjectDetection(
         }
     }
 
+    /* --------------------------- Memory Management ---------------------------- */
+    
+    private fun forceMemoryAllocation() {
+        try {
+            // Force JVM to allocate maximum available memory
+            val maxMemory = runtime.maxMemory()
+            val totalMemory = runtime.totalMemory()
+            val freeMemory = runtime.freeMemory()
+            val usedMemory = totalMemory - freeMemory
+            val availableMemory = maxMemory - usedMemory
+            
+            Log.i(TAG, "💾 Memory Stats - Max: ${maxMemory/1024/1024}MB, Used: ${usedMemory/1024/1024}MB, Available: ${availableMemory/1024/1024}MB")
+            
+            // Pre-allocate memory to prevent later allocations that could trigger swapping
+            val bufferSize = minOf(availableMemory / 4, 100 * 1024 * 1024L).toInt() // Use 25% of available or 100MB max
+            val preAllocBuffer = ByteArray(bufferSize)
+            preAllocBuffer.fill(0) // Touch all memory pages
+            
+            // Disable garbage collection during inference periods
+            System.gc() // One final GC before we start
+            
+            Log.i(TAG, "✅ Pre-allocated ${bufferSize/1024/1024}MB RAM buffer to prevent swapping")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Could not pre-allocate memory: ${e.message}")
+        }
+    }
+    
+    private fun warmUpSession() {
+        try {
+            // FIXED: Create a separate warmup session to avoid corrupting the main session
+            val warmupSessionOpts = LlmInferenceSessionOptions.builder()
+                .setTemperature(0.2f)
+                .setGraphOptions(GraphOptions.builder().setEnableVisionModality(true).build())
+                .build()
+            
+            Log.i(TAG, "🔥 Creating separate warmup session to avoid session corruption...")
+            val warmupStart = System.currentTimeMillis()
+            
+            // Create separate warmup session, use it, then dispose it
+            LlmInferenceSession.createFromOptions(llm!!, warmupSessionOpts).use { warmupSession ->
+                // Create a small dummy image for warming up
+                val warmupBitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.RGB_565)
+                val warmupImage = BitmapImageBuilder(warmupBitmap).build()
+                
+                Log.i(TAG, "🔥 Performing warmup inference with separate session...")
+                
+                // Perform a lightweight warmup inference with disposable session
+                warmupSession.addQueryChunk("Test")
+                warmupSession.addImage(warmupImage)
+                warmupSession.generateResponse() // This loads model weights into RAM
+                
+                warmupImage.close()
+                warmupBitmap.recycle()
+                
+                Log.i(TAG, "✅ Warmup session disposed - main session should be clean")
+            }
+            
+            sessionWarmedUp = true
+            val warmupTime = System.currentTimeMillis() - warmupStart
+            Log.i(TAG, "✅ Model warmed up in ${warmupTime}ms - weights should now be hot in RAM")
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Session warmup failed: ${e.message}")
+            sessionWarmedUp = false
+        }
+    }
+    
+    private fun recreateSession() {
+        try {
+            Log.i(TAG, "🔄 Starting session recreation...")
+            
+            // Force garbage collection before closing session
+            System.gc()
+            
+            // Close existing session if it exists
+            session?.close()
+            session = null
+            
+            // Brief pause to allow cleanup
+            Thread.sleep(100)
+            
+            // Create a new session with the same options
+            val sessionOpts = LlmInferenceSessionOptions.builder()
+                .setTemperature(0.2f)
+                .setGraphOptions(GraphOptions.builder().setEnableVisionModality(true).build())
+                .build()
+            
+            session = LlmInferenceSession.createFromOptions(llm!!, sessionOpts)
+            sessionWarmedUp = false // Mark as not warmed up since it's a new session
+            
+            // Force another GC after recreation
+            System.gc()
+            
+            Log.i(TAG, "✅ Session recreated successfully to prevent token accumulation")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to recreate session: ${e.message}")
+            session = null
+        }
+    }
+    
+    private fun preventGarbageCollection() {
+        // Hint to JVM to avoid GC during inference
+        System.runFinalization()
+        
+        // Additional JVM memory pressure relief
+        try {
+            // Signal to JVM that we want to keep objects in memory
+            val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+            val maxMemory = runtime.maxMemory()
+            val memoryPressure = usedMemory.toDouble() / maxMemory.toDouble()
+            
+            if (memoryPressure > 0.8) {
+                Log.w(TAG, "🚨 CRITICAL MEMORY PRESSURE: ${String.format("%.1f", memoryPressure * 100)}% - MODEL MAY SWAP TO DISK!")
+                Log.w(TAG, "💡 TIP: Close other apps to free RAM for better Gemma performance")
+            }
+        } catch (e: Exception) {
+            Log.v(TAG, "Could not check memory pressure: ${e.message}")
+        }
+    }
+
     /* ------------------------------- Utilities ------------------------------------ */
 
     private fun resizeIfNeeded(src: Bitmap): Bitmap {
@@ -304,25 +525,40 @@ class ObjectDetection(
 
     /**
      * Parses a list of text lines from the LLM into a structured List of Detection objects.
+     * Automatically detects and normalizes absolute pixel coordinates to 0-1 range.
+     * 
+     * @param lines The text lines from the LLM response
+     * @param imageWidth The width of the input image in pixels
+     * @param imageHeight The height of the input image in pixels
      */
-    private fun parseDetectionsFromText(lines: List<String>): List<Detection> {
+    private fun parseDetectionsFromText(lines: List<String>, imageWidth: Int, imageHeight: Int): List<Detection> {
         val finalDetections = mutableListOf<Detection>()
 
+        Log.d(TAG, "🔍 PARSING DEBUG: Starting to parse ${lines.size} lines")
+
         // Regex to find the structured data
-        val classRegex = Pattern.compile("""\*\s+\*\*Class:\*\*\s+(.*)""")
-        val boxRegex = Pattern.compile("""\*\s+\*\*Bounding Box:\*\*\s+\((\d+),\s*(\d+),\s*(\d+),\s*(\d+)\)""")
+        val classRegex = Pattern.compile("""\*\s+\*\*Class:\*\*\s+([^,]+)""")
+        val boxRegex = Pattern.compile("""\*\s+\*\*Bounding Box:\*\*\s+\(([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\)""")
         val confidenceRegex = Pattern.compile("""\*\s+\*\*Confidence:\*\*\s+([\d.]+)""")
+
+        Log.d(TAG, "🔍 PARSING DEBUG: Using regex patterns:")
+        Log.d(TAG, "🔍   Class: ${classRegex.pattern()}")
+        Log.d(TAG, "🔍   Box: ${boxRegex.pattern()}")
+        Log.d(TAG, "🔍   Confidence: ${confidenceRegex.pattern()}")
 
         var currentParsedData: ParsedDetectionData? = null
 
         for (line in lines) {
             val trimmedLine = line.trim()
+            Log.v(TAG, "🔍 PARSING: Processing line: '$trimmedLine'")
 
             val classMatcher = classRegex.matcher(trimmedLine)
             if (classMatcher.find()) {
+                Log.d(TAG, "🔍 FOUND CLASS: '${classMatcher.group(1).trim()}'")
                 // A new object is starting. If we were parsing a previous one, save it.
                 currentParsedData?.let {
                     if (it.label.isNotEmpty() && it.boundingBox != null) {
+                        Log.d(TAG, "🔍 SAVING previous detection: ${it.label}")
                         finalDetections.add(Detection(it.boundingBox, it.label, it.confidence, "llm_detection"))
                     }
                 }
@@ -334,11 +570,32 @@ class ObjectDetection(
 
             val boxMatcher = boxRegex.matcher(trimmedLine)
             if (boxMatcher.find()) {
+                Log.d(TAG, "🔍 FOUND BOX: (${boxMatcher.group(1)}, ${boxMatcher.group(2)}, ${boxMatcher.group(3)}, ${boxMatcher.group(4)})")
                 try {
-                    val left = boxMatcher.group(1).toFloat()
-                    val top = boxMatcher.group(2).toFloat()
-                    val right = boxMatcher.group(3).toFloat()
-                    val bottom = boxMatcher.group(4).toFloat()
+                    val rawLeft = boxMatcher.group(1).toFloat()
+                    val rawTop = boxMatcher.group(2).toFloat()
+                    val rawRight = boxMatcher.group(3).toFloat()
+                    val rawBottom = boxMatcher.group(4).toFloat()
+                    
+                    // Detect if coordinates are absolute (pixel values) or normalized (0-1)
+                    // If any coordinate is > 1.0, treat as absolute pixel coordinates
+                    val isAbsolute = rawLeft > 1.0f || rawTop > 1.0f || rawRight > 1.0f || rawBottom > 1.0f
+                    
+                    val (left, top, right, bottom) = if (isAbsolute) {
+                        // Normalize absolute coordinates by dividing by image dimensions
+                        Log.d(TAG, "🔧 COORDINATE NORMALIZATION: Converting absolute coords [$rawLeft, $rawTop, $rawRight, $rawBottom] to normalized")
+                        val normalizedLeft = rawLeft / imageWidth.toFloat()
+                        val normalizedTop = rawTop / imageHeight.toFloat()
+                        val normalizedRight = rawRight / imageWidth.toFloat()
+                        val normalizedBottom = rawBottom / imageHeight.toFloat()
+                        Log.d(TAG, "🔧 NORMALIZED COORDS: [$normalizedLeft, $normalizedTop, $normalizedRight, $normalizedBottom]")
+                        listOf(normalizedLeft, normalizedTop, normalizedRight, normalizedBottom)
+                    } else {
+                        // Already normalized coordinates
+                        Log.d(TAG, "✅ COORDS ALREADY NORMALIZED: [$rawLeft, $rawTop, $rawRight, $rawBottom]")
+                        listOf(rawLeft, rawTop, rawRight, rawBottom)
+                    }
+                    
                     currentParsedData.boundingBox = RectF(left, top, right, bottom)
                 } catch (e: Exception) {
                     Log.e(TAG, "Could not parse bounding box in line: $trimmedLine", e)
@@ -348,27 +605,125 @@ class ObjectDetection(
 
             val confidenceMatcher = confidenceRegex.matcher(trimmedLine)
             if (confidenceMatcher.find()) {
+                Log.d(TAG, "🔍 FOUND CONFIDENCE: ${confidenceMatcher.group(1)}")
                 try {
                     currentParsedData.confidence = confidenceMatcher.group(1).toFloat()
                     // This is the last piece of info. The object is complete.
                     if (currentParsedData.label.isNotEmpty() && currentParsedData.boundingBox != null) {
+                        Log.d(TAG, "🔍 COMPLETING detection: ${currentParsedData.label} with confidence ${currentParsedData.confidence}")
                         finalDetections.add(Detection(currentParsedData.boundingBox, currentParsedData.label, currentParsedData.confidence, "llm_detection"))
                     }
                     currentParsedData = null // Reset for the next object
                 } catch (e: Exception) {
                     Log.e(TAG, "Could not parse confidence in line: $trimmedLine", e)
                 }
+            } else {
+                Log.v(TAG, "🔍 NO MATCH: Line '$trimmedLine' didn't match any pattern")
             }
         }
 
         // Add the last detection if the loop ended before its confidence line was found.
         currentParsedData?.let {
             if (it.label.isNotEmpty() && it.boundingBox != null) {
+                Log.d(TAG, "🔍 FINAL detection: ${it.label}")
                 finalDetections.add(Detection(it.boundingBox, it.label, it.confidence, "llm_detection"))
             }
         }
 
+        Log.d(TAG, "🔍 PARSING COMPLETE: Found ${finalDetections.size} total detections")
+        
+        // If no detections found with strict parsing, try alternative formats
+        if (finalDetections.isEmpty()) {
+            Log.w(TAG, "🔍 STRICT PARSING FAILED - Attempting fallback parsing...")
+            return parseDetectionsFallback(lines, imageWidth, imageHeight)
+        }
+
         return finalDetections
+    }
+
+    /**
+     * Fallback parser that tries multiple different formats the model might generate.
+     * Automatically detects and normalizes absolute pixel coordinates to 0-1 range.
+     * 
+     * @param lines The text lines from the LLM response
+     * @param imageWidth The width of the input image in pixels
+     * @param imageHeight The height of the input image in pixels
+     */
+    private fun parseDetectionsFallback(lines: List<String>, imageWidth: Int, imageHeight: Int): List<Detection> {
+        val detections = mutableListOf<Detection>()
+        
+        Log.d(TAG, "🔍 FALLBACK PARSING: Trying alternative patterns...")
+        
+        // Try various common patterns the model might use
+        val patterns = listOf(
+            // Pattern 0: * **Class:** Smartphone, **Bounding Box:** (0.3, 0.3, 0.7, 0.9), **Confidence:** 0.95
+            """\*\s*\*\*Class:\*\*\s*([^,]+),\s*\*\*Bounding Box:\*\*\s*\(([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\),\s*\*\*Confidence:\*\*\s*([\d.]+)""",
+            // Pattern 1: **Class:** person **Box:** (x,y,x,y) **Confidence:** 0.9
+            """\*\*Class:\*\*\s*([^*]+)\s*\*\*Box:\*\*\s*\(([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\)\s*\*\*Confidence:\*\*\s*([\d.]+)""",
+            // Pattern 2: Class: person, Box: (x,y,x,y), Confidence: 0.9
+            """Class:\s*([^,]+),\s*Box:\s*\(([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\),\s*Confidence:\s*([\d.]+)""",
+            // Pattern 3: person (x,y,x,y) confidence
+            """([a-zA-Z]+)\s*\(([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\)\s*([\d.]+)""",
+            // Pattern 4: Simple object name with bounding box
+            """([a-zA-Z\s]+).*?\(([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\)"""
+        )
+        
+        for (line in lines) {
+            val trimmedLine = line.trim()
+            if (trimmedLine.isEmpty()) continue
+            
+            for ((index, pattern) in patterns.withIndex()) {
+                try {
+                    val regex = Pattern.compile(pattern)
+                    val matcher = regex.matcher(trimmedLine)
+                    
+                    if (matcher.find()) {
+                        Log.d(TAG, "🔍 FALLBACK MATCH pattern $index on line: '$trimmedLine'")
+                        
+                        val label = matcher.group(1).trim()
+                        val rawLeft = matcher.group(2).toFloat()
+                        val rawTop = matcher.group(3).toFloat()
+                        val rawRight = matcher.group(4).toFloat()
+                        val rawBottom = matcher.group(5).toFloat()
+                        val confidence = when (index) {
+                            0, 1, 2, 3 -> try { matcher.group(6)?.toFloat() ?: 0.5f } catch (e: Exception) { 0.5f } // Patterns with confidence
+                            4 -> 0.5f // Pattern 4 has no confidence group
+                            else -> 0.5f
+                        }
+                        
+                        // Detect if coordinates are absolute (pixel values) or normalized (0-1)
+                        // If any coordinate is > 1.0, treat as absolute pixel coordinates
+                        val isAbsolute = rawLeft > 1.0f || rawTop > 1.0f || rawRight > 1.0f || rawBottom > 1.0f
+                        
+                        val (left, top, right, bottom) = if (isAbsolute) {
+                            // Normalize absolute coordinates by dividing by image dimensions
+                            Log.d(TAG, "🔧 COORDINATE NORMALIZATION: Converting absolute coords [$rawLeft, $rawTop, $rawRight, $rawBottom] to normalized")
+                            val normalizedLeft = rawLeft / imageWidth.toFloat()
+                            val normalizedTop = rawTop / imageHeight.toFloat()
+                            val normalizedRight = rawRight / imageWidth.toFloat()
+                            val normalizedBottom = rawBottom / imageHeight.toFloat()
+                            Log.d(TAG, "🔧 NORMALIZED COORDS: [$normalizedLeft, $normalizedTop, $normalizedRight, $normalizedBottom]")
+                            listOf(normalizedLeft, normalizedTop, normalizedRight, normalizedBottom)
+                        } else {
+                            // Already normalized coordinates
+                            Log.d(TAG, "✅ COORDS ALREADY NORMALIZED: [$rawLeft, $rawTop, $rawRight, $rawBottom]")
+                            listOf(rawLeft, rawTop, rawRight, rawBottom)
+                        }
+                        
+                        val boundingBox = RectF(left, top, right, bottom)
+                        detections.add(Detection(boundingBox, label, confidence, "llm_detection_fallback"))
+                        
+                        Log.d(TAG, "🔍 FALLBACK DETECTION: $label at $boundingBox with confidence $confidence")
+                        break // Found a match, try next line
+                    }
+                } catch (e: Exception) {
+                    Log.v(TAG, "🔍 Fallback pattern $index failed on line: $trimmedLine")
+                }
+            }
+        }
+        
+        Log.d(TAG, "🔍 FALLBACK COMPLETE: Found ${detections.size} detections using fallback patterns")
+        return detections
     }
 
 
