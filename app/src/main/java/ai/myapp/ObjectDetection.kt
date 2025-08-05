@@ -59,8 +59,8 @@ class ObjectDetection(
     /* ------------------------------- Parameters ---------------------------------- */
 
     private val modelAssetName = "gemma-3n-E2B-it-int4.task"
-    private val frameIntervalMs = 10_000L        // 0.1 fps sampler
-    private val inferenceTimeoutMs = 60_000L    // Increased timeout for generative model
+    private val frameIntervalMs = 5_000L         // 0.2 fps sampler (faster but still conservative)
+    private val inferenceTimeoutMs = 30_000L    // Reduced timeout to catch hung inferences faster
     private val maxEdge = 512                   // max image edge sent to model
 
     /* --------------------------- Public lifecycle API ---------------------------- */
@@ -218,8 +218,8 @@ class ObjectDetection(
 
                 val rawText = try {
                     Log.v(TAG, "📝 Adding query chunk and image to reusable session...")
-                    // This prompt guides the model to produce the structured output we can parse.
-                    currentSession.addQueryChunk("Detect objects. For each object found, provide on separate lines: * **Class:** [object name], * **Bounding Box:** (x1, y1, x2, y2), * **Confidence:** [score]")
+                    // *** OPTIMIZED PROMPT: More concise for faster inference ***
+                    currentSession.addQueryChunk("List objects in format: * **Class:** NAME, * **Bounding Box:** (x1,y1,x2,y2), * **Confidence:** SCORE")
                     currentSession.addImage(img)
 
                     Log.v(TAG, "⚡ Generating detection response...")
@@ -233,7 +233,7 @@ class ObjectDetection(
                         sessionInferenceCount = 1
                         
                         // Retry with fresh session
-                        currentSession.addQueryChunk("Detect objects. For each object found, provide on separate lines: * **Class:** [object name], * **Bounding Box:** (x1, y1, x2, y2), * **Confidence:** [score]")
+                        currentSession.addQueryChunk("List objects in format: * **Class:** NAME, * **Bounding Box:** (x1,y1,x2,y2), * **Confidence:** SCORE")
                         currentSession.addImage(img)
                         currentSession.generateResponse()
                     } else {
@@ -298,12 +298,12 @@ class ObjectDetection(
 
             val opts = LlmInferenceOptions.builder()
                 .setModelPath(path)
-                .setMaxTokens(1536)  // Further increased tokens to prevent OUT_OF_RANGE errors
-                .setMaxTopK(10)
+                .setMaxTokens(1024)   // *** PERFORMANCE OPTIMIZATION: Reduced tokens for faster inference ***
+                .setMaxTopK(5)       // *** PERFORMANCE OPTIMIZATION: Reduced TopK for faster processing ***
                 .setMaxNumImages(1)
                 .build()
 
-            Log.d(TAG, "⚙️ Creating LlmInference with options: maxTokens=1536, maxTopK=10, maxImages=1")
+            Log.d(TAG, "⚙️ Creating LlmInference with options: maxTokens=1024, maxTopK=5, maxImages=1")
             llm = LlmInference.createFromOptions(context, opts)
             
             // Create a single reusable session
@@ -535,12 +535,18 @@ class ObjectDetection(
                 Log.d(TAG, "🔍 FOUND CLASS: '${classMatcher.group(1).trim()}'")
                 // A new object is starting. If we were parsing a previous one, save it.
                 currentParsedData?.let {
-                    if (it.label.isNotEmpty() && it.boundingBox != null) {
+                    if (it.label.isNotEmpty() && it.label.length > 1 && it.boundingBox != null) {
                         Log.d(TAG, "🔍 SAVING previous detection: ${it.label}")
                         finalDetections.add(Detection(it.boundingBox, it.label, it.confidence, "llm_detection"))
                     }
                 }
-                currentParsedData = ParsedDetectionData(label = classMatcher.group(1).trim())
+                val newLabel = classMatcher.group(1).trim()
+                if (newLabel.isNotBlank() && newLabel.length > 1) {
+                    currentParsedData = ParsedDetectionData(label = newLabel)
+                } else {
+                    Log.w(TAG, "⚠️ REJECTED INVALID LABEL: '$newLabel'")
+                    currentParsedData = null
+                }
                 continue
             }
 
@@ -574,7 +580,28 @@ class ObjectDetection(
                         listOf(rawLeft, rawTop, rawRight, rawBottom)
                     }
                     
-                    currentParsedData.boundingBox = RectF(left, top, right, bottom)
+                    // *** CRITICAL FIX: Clamp all coordinates to valid 0-1 range ***
+                    val clampedLeft = left.coerceIn(0f, 1f)
+                    val clampedTop = top.coerceIn(0f, 1f)
+                    val clampedRight = right.coerceIn(0f, 1f)
+                    val clampedBottom = bottom.coerceIn(0f, 1f)
+                    
+                    // *** CRITICAL FIX: Ensure valid box dimensions (left < right, top < bottom) ***
+                    val validLeft = minOf(clampedLeft, clampedRight)
+                    val validRight = maxOf(clampedLeft, clampedRight)
+                    val validTop = minOf(clampedTop, clampedBottom)
+                    val validBottom = maxOf(clampedTop, clampedBottom)
+                    
+                    // *** CRITICAL FIX: Reject boxes with zero or near-zero area ***
+                    val boxWidth = validRight - validLeft
+                    val boxHeight = validBottom - validTop
+                    if (boxWidth < 0.01f || boxHeight < 0.01f) {
+                        Log.w(TAG, "⚠️ REJECTED INVALID BOX: width=$boxWidth, height=$boxHeight")
+                        continue // Skip this detection
+                    }
+                    
+                    Log.d(TAG, "✅ VALID COORDS: [$validLeft, $validTop, $validRight, $validBottom] (${String.format("%.3f", boxWidth)}x${String.format("%.3f", boxHeight)})")
+                    currentParsedData.boundingBox = RectF(validLeft, validTop, validRight, validBottom)
                 } catch (e: Exception) {
                     Log.e(TAG, "Could not parse bounding box in line: $trimmedLine", e)
                 }
@@ -688,7 +715,34 @@ class ObjectDetection(
                             listOf(rawLeft, rawTop, rawRight, rawBottom)
                         }
                         
-                        val boundingBox = RectF(left, top, right, bottom)
+                        // *** CRITICAL FIX: Clamp all coordinates to valid 0-1 range ***
+                        val clampedLeft = left.coerceIn(0f, 1f)
+                        val clampedTop = top.coerceIn(0f, 1f)
+                        val clampedRight = right.coerceIn(0f, 1f)
+                        val clampedBottom = bottom.coerceIn(0f, 1f)
+                        
+                        // *** CRITICAL FIX: Ensure valid box dimensions (left < right, top < bottom) ***
+                        val validLeft = minOf(clampedLeft, clampedRight)
+                        val validRight = maxOf(clampedLeft, clampedRight)
+                        val validTop = minOf(clampedTop, clampedBottom)
+                        val validBottom = maxOf(clampedTop, clampedBottom)
+                        
+                        // *** CRITICAL FIX: Reject boxes with zero or near-zero area ***
+                        val boxWidth = validRight - validLeft
+                        val boxHeight = validBottom - validTop
+                        if (boxWidth < 0.01f || boxHeight < 0.01f) {
+                            Log.w(TAG, "⚠️ REJECTED INVALID FALLBACK BOX: width=$boxWidth, height=$boxHeight")
+                            continue // Skip this detection
+                        }
+                        
+                        // *** CRITICAL FIX: Reject empty or invalid labels ***
+                        if (label.isBlank() || label.length < 2) {
+                            Log.w(TAG, "⚠️ REJECTED INVALID LABEL: '$label'")
+                            continue // Skip this detection
+                        }
+                        
+                        Log.d(TAG, "✅ VALID FALLBACK COORDS: [$validLeft, $validTop, $validRight, $validBottom] (${String.format("%.3f", boxWidth)}x${String.format("%.3f", boxHeight)})")
+                        val boundingBox = RectF(validLeft, validTop, validRight, validBottom)
                         detections.add(Detection(boundingBox, label, confidence, "llm_detection_fallback"))
                         
                         Log.d(TAG, "🔍 FALLBACK DETECTION: $label at $boundingBox with confidence $confidence")
