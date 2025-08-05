@@ -190,12 +190,8 @@ class ObjectDetection(
         // Prevent garbage collection during inference to avoid memory pressure
         preventGarbageCollection()
 
-        val engine = llm ?: return@withContext null
-
         try {
             withTimeout(inferenceTimeoutMs) {
-                var bundle: ResultBundle? = null
-                
                 // Track session usage first
                 sessionInferenceCount++
                 
@@ -265,16 +261,15 @@ class ObjectDetection(
                     Log.d(TAG, "🎯 [4/5] Parsed Detection #$index: '${detection.label}' (confidence: ${String.format("%.2f", detection.confidence)}, box: ${detection.boundingBox})")
                 }
 
-                bundle = ResultBundle(
+                Log.v(TAG, "📦 Created ResultBundle with ${detections.size} detections for ${img.width}x${img.height} image")
+
+                return@withTimeout ResultBundle(
                     detections,
                     inferenceTime,
                     img.height,
                     img.width,
                     imageRotation
                 )
-                Log.v(TAG, "📦 Created ResultBundle with ${detections.size} detections for ${img.width}x${img.height} image")
-                
-                return@withTimeout bundle
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Inference error after ${SystemClock.uptimeMillis() - start}ms", e)
@@ -286,7 +281,6 @@ class ObjectDetection(
             Log.v(TAG, "🏁 Inference session completed, ready for next frame")
         }
     }
-
     /* ------------------------------ Model loading -------------------------------- */
 
     private suspend fun loadModelIfNeeded() = withContext(Dispatchers.IO) {
@@ -339,51 +333,35 @@ class ObjectDetection(
     }
 
     private fun copyAssetToFile(assetName: String): String {
-        val out = File(context.filesDir, assetName)
-        Log.i(TAG, "📁 [1/5] CHECKING MODEL LOCATION: ${out.absolutePath}")
+        val internalFile = File(context.filesDir, assetName)
 
-        if (!out.exists()) {
-            Log.w(TAG, "📥 [1/5] MODEL FILE NOT FOUND: $assetName not in internal storage")
-
-            val sdcardFile = File("/sdcard/$assetName")
-            Log.i(TAG, "📥 [1/5] CHECKING SDCARD: Looking for model at ${sdcardFile.absolutePath}")
-
-            if (sdcardFile.exists()) {
-                Log.i(TAG, "📥 [1/5] MODEL FOUND ON SDCARD: Found model file (${sdcardFile.length()} bytes)")
-                Log.i(TAG, "📥 [1/5] COPYING MODEL: Copying from ${sdcardFile.absolutePath} to ${out.absolutePath}")
-
-                try {
-                    copyFile(sdcardFile, out)
-                    Log.i(TAG, "✅ [1/5] MODEL COPIED SUCCESSFULLY: Model copied to internal storage (${out.length()} bytes)")
-                } catch (e: Exception) {
-                    Log.e(TAG, "❌ [1/5] MODEL COPY FAILED: Failed to copy model file", e)
-                    throw RuntimeException("Failed to copy model file from SDCard: ${e.message}")
-                }
-            } else {
-                Log.w(TAG, "📥 [1/5] MODEL FILE NOT FOUND: $assetName not found in SDCard either")
-                throw RuntimeException("Model file not found. Please copy $assetName to /sdcard/ or internal storage.")
-            }
-        } else {
-            Log.i(TAG, "📥 [1/5] MODEL FOUND IN INTERNAL MEMORY: Found model file (${out.length()} bytes)")
+        // 1. If the model is already in its final internal location, we are done.
+        if (internalFile.exists()) {
+            Log.i(TAG, "📥 [1/5] MODEL FOUND IN INTERNAL MEMORY: (${internalFile.length()} bytes)")
+            return internalFile.absolutePath
         }
 
-        return out.absolutePath
-    }
+        Log.i(TAG, "📥 [1/5] MODEL NOT FOUND: Copying from app assets...")
 
-    private fun copyFile(source: File, destination: File) {
-        FileInputStream(source).use { inputStream ->
-            FileOutputStream(destination).use { outputStream ->
-                val buffer = ByteArray(8192)
-                var length: Int
-                while (inputStream.read(buffer).also { length = it } > 0) {
-                    outputStream.write(buffer, 0, length)
+        // 2. If not found, copy it from the app's assets folder.
+        try {
+            context.assets.open(assetName).use { inputStream ->
+                FileOutputStream(internalFile).use { outputStream ->
+                    val buffer = ByteArray(8192) // Use a larger buffer for faster copying
+                    var length: Int
+                    while (inputStream.read(buffer).also { length = it } > 0) {
+                        outputStream.write(buffer, 0, length)
+                    }
                 }
-                outputStream.flush()
             }
+            Log.i(TAG, "✅ [1/5] MODEL COPIED SUCCESSFULLY: to ${internalFile.absolutePath}")
+            return internalFile.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ [1/5] FATAL: FAILED TO COPY MODEL FROM ASSETS", e)
+            // If the model cannot be copied from assets, the app cannot function.
+            throw RuntimeException("Critical error: Failed to copy model file from assets. Please ensure '$assetName' is in the 'src/main/assets' directory.", e)
         }
-    }
-
-    /* --------------------------- Memory Management ---------------------------- */
+    }    /* --------------------------- Memory Management ---------------------------- */
     
     private fun forceMemoryAllocation() {
         try {

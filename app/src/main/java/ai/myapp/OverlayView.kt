@@ -63,7 +63,7 @@ class OverlayView @JvmOverloads constructor(
         imageRotation: Int
     ) {
         Log.d("OverlayView", "📊 Setting ${detections.size} detections on overlay (${outputWidth}x${outputHeight}, rotation: ${imageRotation}°)")
-        
+
         this.detections = detections
         this.outputWidth = outputWidth
         this.outputHeight = outputHeight
@@ -82,7 +82,7 @@ class OverlayView @JvmOverloads constructor(
         )
 
         Log.d("OverlayView", "📏 Overlay view size: ${width}x${height}, scale factor: $scaleFactor")
-        
+
         // Log detections with bounding boxes
         detections.forEachIndexed { index, detection ->
             if (detection.boundingBox != null) {
