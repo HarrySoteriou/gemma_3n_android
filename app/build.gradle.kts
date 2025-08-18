@@ -26,6 +26,12 @@ android {
         ndk {
             abiFilters.add("arm64-v8a")
         }
+        // NPU runtime libraries: Mediatek
+        dynamicFeatures.add(":litert_npu_runtime_libraries:mediatek_runtime")
+        dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v69")
+        dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v73")
+        dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v75")
+        dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v79")
     }
 
     buildTypes {
@@ -64,13 +70,6 @@ android {
     }
 }
 
-// NPU runtime libraries
-//dynamicFeatures.add(":litert_npu_runtime_libraries:mediatek_runtime")
-//dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v69")
-//dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v73")
-//dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v75")
-//dynamicFeatures.add(":litert_npu_runtime_libraries:qualcomm_runtime_v79")
-
 dependencies {
     // Use the latest stable versions
     implementation("androidx.core:core-ktx:1.16.0")
@@ -101,7 +100,13 @@ dependencies {
 
     // --- LiteRT Next Dependencies (for advanced NPU support) ---
     // The core LiteRT Next API (includes accelerator providers)
-    implementation("com.google.ai.edge.litert:litert:1.4.0")
+    implementation("com.google.ai.edge.litert:litert:2.0.0-alpha.1")
+
+    // NPU runtime libraries: Qualcomm (Updated for S24 Snapdragon 8 Gen 3 support)
+    implementation("com.qualcomm.qti:qnn-runtime:2.37.1")
+    implementation("com.qualcomm.qti:qnn-litert-delegate:2.37.1")
+
+    implementation(project(":litert_npu_runtime_libraries:runtime_strings"))
 
     // Testing - Consolidate duplicate dependencies
     testImplementation("junit:junit:4.13.2")
