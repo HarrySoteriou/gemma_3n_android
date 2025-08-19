@@ -33,3 +33,4 @@ app/build/
 .idea/
 local.properties
 app/src/main/assets
+litert_npu_runtime_libraries/
