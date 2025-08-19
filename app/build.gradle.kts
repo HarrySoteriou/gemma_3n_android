@@ -67,6 +67,16 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+
+        jniLibs {
+            // Resolve conflicts between different Qualcomm runtime versions
+            // Pick the latest version (v79) for shared libraries
+            pickFirsts += listOf(
+                "**/libQnnHtp.so",
+                "**/libQnnSystem.so", 
+                "**/libLiteRtDispatch_Qualcomm.so"
+            )
+        }
     }
 }
 
